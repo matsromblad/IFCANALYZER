@@ -1,9 +1,60 @@
-🏗️ IFC Bloat AnalyzerA fast, lightweight Python application designed to analyze Industry Foundation Classes (.IFC) files. It determines content composition, identifies "heavy" geometry, and spots potential data bloat without the need for slow 3D rendering.📋 Features📊 Composition Breakdown: Calculates the percentage of file size/count dedicated to Geometry, Metadata, Relationships, and Core definitions.⚖️ Heavy Object Detection: Identifies specific objects (e.g., furniture, detailed hardware) that contain disproportionately high polygon or face counts using a smart "bottom-up" density check.📝 Header Analysis: Extracts detailed information from the IFC header (Originating System, View Definition, Timestamp, Author).📈 Bloat Statistics: Lists the top 5 most common entities to spot excessive tessellation or property set duplication.🧹 Orphan Check: Performs detailed sampling to estimate how many entities in the file are unreferenced "dead weight" (orphaned data).🖥️ GUI: Clean, responsive interface built with Tkinter.⚙️ PrerequisitesPython 3.x installed on your system.The ifcopenshell library.🚀 Installation & Usage1. SetupClone this repository and navigate to the folder.git clone [https://github.com/yourusername/ifc-bloat-analyzer.git](https://github.com/yourusername/ifc-bloat-analyzer.git)
-cd ifc-bloat-analyzer
-Important: Ensure you have the required image file Romblad_Haxx.png in the same directory as the script for the branding to load correctly.2. Install DependenciesInstall the required IFC parsing library:python -m pip install ifcopenshell
-(Note: tkinter is usually included with standard Python installations).3. Run the AppExecute the script directly via Python:python ifc_analyzer.py
-Click "Select .IFC File".Wait for the analysis to complete (large files may take a few seconds).Review the generated log for insights.📦 Building a Standalone Executable (.exe)To create a single-file application that you can share with colleagues (who don't have Python installed), use PyInstaller.1. Install PyInstallerpython -m pip install pyinstaller
-2. Build CommandRun the following command exactly as written. It handles the inclusion of the logo image and forces the collection of the complex ifcopenshell dependencies.For Windows (PowerShell/CMD):python -m PyInstaller --noconsole --onefile --collect-all ifcopenshell --add-data "Romblad_Haxx.png;." --name "IFC Analyzer" ifc_analyzer.py
-For macOS/Linux:Replace the semicolon ; with a colon : in the add-data flag:python -m PyInstaller --noconsole --onefile --collect-all ifcopenshell --add-data "Romblad_Haxx.png:." --name "IFC Analyzer" ifc_analyzer.py
-3. Locate the AppAfter the build finishes, find your standalone application in the dist/ folder.❓ Troubleshooting<details><summary><strong>"Pip is not recognized" error</strong></summary>If you get errors trying to install libraries, ensure Python is added to your system PATH. On Windows, try using the Python launcher:py -m pip install ifcopenshell
-</details><details><summary><strong>"Missing Library" inside the App</strong></summary>If the app runs but complains about missing libraries, click the "Attempt Auto-Install" button in the UI, or manually run the installation command provided in the terminal window.</details><details><summary><strong>Image not showing in EXE</strong></summary>Ensure Romblad_Haxx.png is in the same folder as the script when running the build command. Ensure you used the --add-data flag correctly as shown in the Build section.</details>📄 LicenseThis project is licensed under the MIT License - see the LICENSE file for details.
+
+IFC Composition & Bloat Analyzer
+A lightweight, Python-based GUI utility designed to audit Industry Foundation Classes (IFC) files. Unlike standard BIM viewers, this tool focuses on the "weight" of the file—analyzing whether your IFC is bloated by overly complex geometry or excessive metadata—without the overhead of 3D rendering.
+
+🚀 Features
+Geometry vs. Metadata Breakdown: Get a percentage-based breakdown of how much of your file is dedicated to 3D topology vs. property data.
+
+Heavy Object Detection: Automatically identifies the top 5 most complex geometric objects (e.g., highly detailed furniture or mechanical equipment) and traces them back to their parent element (e.g., IfcWall, IfcFurnishingElement).
+
+Orphan Detection: Samples the file for "orphaned" entities—data that exists in the file but is not referenced by any other element.
+
+Header Inspection: Extracts BIM authoring information, including the originating system, schema version, and timestamp.
+
+No 3D Required: Uses ifcopenshell for logic only, making it extremely fast even on low-spec hardware.
+
+🛠️ Prerequisites
+To run this application, you need Python 3.x and the ifcopenshell library.
+
+Install Dependencies
+Bash
+pip install ifcopenshell
+Note: The application includes an "Auto-Install" feature that attempts to download the library for you if it is missing.
+
+📖 How to Use
+Run the Script:
+
+Bash
+python ifc_analyzer.py
+Load a File: Click the Select .IFC File button and choose your model.
+
+View Results: The analyzer will process the file and generate a report in the output window.
+
+Interpreting the Report
+Composition Breakdown: If "Geometry" is >80%, consider simplifying 3D representations. If "Metadata" is >50%, check for duplicate property sets.
+
+Heavy Object Report: Look for objects with high "Complexity" scores. These are often the culprits for slow model performance in Revit, ArchiCAD, or Navisworks.
+
+Orphaned Geometry: If the tool identifies "Orphaned Geometry," these are entities that contribute to file size but don't appear in the model. These can usually be safely removed using a "Purge" command in your BIM software.
+
+📦 Project Structure
+ifc_analyzer.py: The main Python script containing the Tkinter GUI and analysis logic.
+
+Romblad_Haxx.png: (Optional) A logo file displayed in the header. If missing, the app will run with a text-only header.
+
+🛠️ Technical Details
+The tool uses a recursive "Trace Up" logic to find geometry owners. It navigates from low-level geometry (like IfcTriangulatedFaceSet) through intermediate containers (IfcShapeRepresentation, IfcMappedItem) until it finds the high-level IfcProduct.
+
+Categorization Keywords:
+The analyzer categorizes entities based on their IFC class name:
+
+Geometry: Points, Curves, Surfaces, Tessellations, Placements.
+
+Metadata: Properties, Quantities, Materials, Classifications.
+
+Relations: All IfcRel... subclasses that link data together.
+
+⚖️ License
+This project is open-source. Feel free to modify and adapt it for your BIM coordination workflows.
+
+Disclaimer: This tool provides analysis based on entity counts and complexity scores; it does not modify your IFC files.
