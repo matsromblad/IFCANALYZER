@@ -1,0 +1,435 @@
+
+--- a/ifc_analyzer.py
++++ b/ifc_analyzer.py
+@@
+ def diff_reports(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+   # Compare B against A
+   delta_counts = collections.Counter(b["counts"]["full"])
+   delta_counts.subtract(collections.Counter(a["counts"]["full"]))
+   # Compare payloads
+   # We need to reconstruct full payload maps if available, but we only stored topN in the simplified return.
+   # In a full app we'd pass full payload dicts, but for now we rely on entity count deltas as proxy.
+   return {
+     "meta": {"a": a["meta"]["filepath"], "b": b["meta"]["filepath"]},
+     "summary": {
+       "entity_total": {
+         "a": int(a["meta"]["entity_total"]),
+         "b": int(b["meta"]["entity_total"]),
+         "delta": int(b["meta"]["entity_total"]) - int(a["meta"]["entity_total"]),
+       },
+       "schema_change": a["meta"]["schema"] != b["meta"]["schema"]
+     },
+     "by_type_delta_top10": [{"type": k, "delta": v, "a": a["counts"]["full"].get(k,0), "b": b["counts"]["full"].get(k,0)}
+       for k, v in delta_counts.most_common(10) if v != 0],
+     "by_type_delta_bottom10": [{"type": k, "delta": v, "a": a["counts"]["full"].get(k,0), "b": b["counts"]["full"].get(k,0)}
+       for k, v in delta_counts.most_common()[:-10:-1] if v != 0]
+   }
++
++# --- Clean options & helpers -------------------------------------------------
++@dataclass
++class CleanOptions:
++    remove_uncontained_products: bool = True
++    remove_broken_relationships: bool = True
++    remove_unused_psets: bool = True
++    remove_unused_types: bool = True
++    remove_unused_materials: bool = True
++    remove_unreferenced_geometry: bool = False  # avancerat (konservativt)
++
++def _is_empty_or_none(v):
++    if v is None:
++        return True
++    if isinstance(v, (list, tuple, set)):
++        if len(v) == 0:
++            return True
++        return any(x is None for x in v)
++    return False
++
++def collect_cleanup_candidates(
++    ifc_file,
++    cancel_event: threading.Event,
++    options: CleanOptions,
++    progress_cb: Optional[Callable[[float, str], None]] = None
++) -> Dict[str, List[Any]]:
++    """
++    Returnerar en dict med listor av entiteter som är kandidater för rensning,
++    baserat på val i CleanOptions. Modellen modifieras inte.
++    """
++    res: Dict[str, List[Any]] = {
++        "uncontained_products": [],
++        "broken_relationships": [],
++        "unused_psets": [],
++        "unused_types": [],
++        "unused_materials": [],
++        "unreferenced_geometry": [],
++    }
++
++    all_entities = list(ifc_file)
++
++    # 1) IfcProduct utan spatial containment
++    if options.remove_uncontained_products and not cancel_event.is_set():
++        if progress_cb: progress_cb(0.05, "Söker objekt utanför byggnadsstrukturen…")
++        for p in ifc_file.by_type("IfcProduct"):
++            if cancel_event.is_set(): break
++            if p.is_a() in {"IfcProject","IfcSite","IfcBuilding","IfcBuildingStorey","IfcSpace"}:
++                continue
++            try:
++                container = ifcopenshell.util.element.get_container(p)
++            except Exception:
++                container = None
++            if not container:
++                res["uncontained_products"].append(p)
++
++    # 2) Trasiga relationer
++    if options.remove_broken_relationships and not cancel_event.is_set():
++        if progress_cb: progress_cb(0.10, "Söker trasiga relationer…")
++        rel_types = (
++            "IfcRelAggregates",
++            "IfcRelContainedInSpatialStructure",
++            "IfcRelDefinesByProperties",
++            "IfcRelAssociatesMaterial",
++            "IfcRelDefinesByType",
++        )
++        for rt in rel_types:
++            for rel in ifc_file.by_type(rt):
++                if cancel_event.is_set(): break
++                ok = True
++                try:
++                    if rt == "IfcRelAggregates":
++                        ok = not (_is_empty_or_none(rel.RelatingObject) or _is_empty_or_none(rel.RelatedObjects))
++                    elif rt == "IfcRelContainedInSpatialStructure":
++                        ok = not (_is_empty_or_none(rel.RelatingStructure) or _is_empty_or_none(rel.RelatedElements))
++                    elif rt == "IfcRelDefinesByProperties":
++                        ok = not (_is_empty_or_none(rel.RelatingPropertyDefinition) or _is_empty_or_none(rel.RelatedObjects))
++                    elif rt == "IfcRelAssociatesMaterial":
++                        ok = not (_is_empty_or_none(rel.RelatingMaterial) or _is_empty_or_none(rel.RelatedObjects))
++                    elif rt == "IfcRelDefinesByType":
++                        ok = not (_is_empty_or_none(rel.RelatingType) or _is_empty_or_none(rel.RelatedObjects))
++                except Exception:
++                    ok = False
++                if not ok:
++                    res["broken_relationships"].append(rel)
++
++    # 3) Oanvända PropertySets / ElementQuantity
++    if options.remove_unused_psets and not cancel_event.is_set():
++        if progress_cb: progress_cb(0.18, "Identifierar oanvända Pset/Quantities…")
++        referenced_psets = set()
++        for rel in ifc_file.by_type("IfcRelDefinesByProperties"):
++            if cancel_event.is_set(): break
++            pdef = getattr(rel, "RelatingPropertyDefinition", None)
++            if pdef:
++                try: referenced_psets.add(pdef.id())
++                except Exception: pass
++        for cls in ("IfcPropertySet", "IfcElementQuantity"):
++            for p in ifc_file.by_type(cls):
++                if cancel_event.is_set(): break
++                try:
++                    if p.id() not in referenced_psets:
++                        res["unused_psets"].append(p)
++                except Exception:
++                    pass
++
++    # 4) Oanvända typer
++    if options.remove_unused_types and not cancel_event.is_set():
++        if progress_cb: progress_cb(0.25, "Identifierar oanvända typer…")
++        referenced_types = set()
++        for rel in ifc_file.by_type("IfcRelDefinesByType"):
++            if cancel_event.is_set(): break
++            t = getattr(rel, "RelatingType", None)
++            if t:
++                try: referenced_types.add(t.id())
++                except Exception: pass
++        for t in ifc_file.by_type("IfcTypeObject"):
++            if cancel_event.is_set(): break
++            try:
++                if t.id() not in referenced_types:
++                    res["unused_types"].append(t)
++            except Exception:
++                pass
++
++    # 5) Oanvända material
++    if options.remove_unused_materials and not cancel_event.is_set():
++        if progress_cb: progress_cb(0.32, "Identifierar oanvända material…")
++        referenced_materials = set()
++        for rel in ifc_file.by_type("IfcRelAssociatesMaterial"):
++            if cancel_event.is_set(): break
++            m = getattr(rel, "RelatingMaterial", None)
++            if m:
++                try: referenced_materials.add(m.id())
++                except Exception: pass
++        for cls in ("IfcMaterial","IfcMaterialLayerSet","IfcMaterialConstituentSet","IfcMaterialProfileSet"):
++            for m in ifc_file.by_type(cls):
++                if cancel_event.is_set(): break
++                try:
++                    if m.id() not in referenced_materials:
++                        res["unused_materials"].append(m)
++                except Exception:
++                    pass
++
++    # 6) Orefererad geometri (valfritt/avancerat)
++    if options.remove_unreferenced_geometry and not cancel_event.is_set():
++        if progress_cb: progress_cb(0.40, "Bygger referensgraf för geometri…")
++        ref_ids = build_referenced_id_set(all_entities, cancel_event, progress_cb=progress_cb)
++        if not cancel_event.is_set():
++            if progress_cb: progress_cb(0.55, "Söker orefererade representation items…")
++            for ri in ifc_file.by_type("IfcRepresentationItem"):
++                if cancel_event.is_set(): break
++                try:
++                    if ri.id() not in ref_ids:
++                        res["unreferenced_geometry"].append(ri)
++                except Exception:
++                    pass
++
++    if progress_cb: progress_cb(0.60, "Förhandsgranskning klar")
++    return res
++
++def execute_cleanup(
++    ifc_file,
++    candidates: Dict[str, List[Any]],
++    options: CleanOptions,
++    cancel_event: threading.Event,
++    progress_cb: Optional[Callable[[float, str], None]] = None
++) -> Dict[str, int]:
++    """
++    Tar bort utpekade kandidater i en säker ordning.
++    Returnerar antal borttagna per kategori.
++    """
++    removed = {
++        "broken_relationships": 0,
++        "unreferenced_geometry": 0,
++        "unused_psets": 0,
++        "unused_types": 0,
++        "unused_materials": 0,
++        "uncontained_products": 0,
++    }
++    order = [
++        ("broken_relationships", options.remove_broken_relationships),
++        ("unreferenced_geometry", options.remove_unreferenced_geometry),
++        ("unused_psets", options.remove_unused_psets),
++        ("unused_types", options.remove_unused_types),
++        ("unused_materials", options.remove_unused_materials),
++        ("uncontained_products", options.remove_uncontained_products),
++    ]
++    total_groups = sum(int(bool(flag)) for _, flag in order)
++    step = 0
++    for key, flag in order:
++        if cancel_event.is_set(): break
++        if not flag: continue
++        items = candidates.get(key, [])
++        if not items:
++            step += 1
++            if progress_cb: progress_cb(0.60 + (0.35 * step / max(total_groups, 1)), f"Inget att rensa i {key.replace('_',' ')}")
++            continue
++        if progress_cb: progress_cb(0.60 + (0.35 * step / max(total_groups, 1)), f"Tar bort {len(items):,} från {key.replace('_',' ')}…")
++        count = 0
++        for ent in items:
++            if cancel_event.is_set(): break
++            try:
++                ifc_file.remove(ent)
++                count += 1
++            except Exception:
++                pass
++        removed[key] = count
++        step += 1
++    if progress_cb: progress_cb(0.95, "Rensning klar")
++    return removed
+@@
+ # ---------------------------
+ # GUI app
+ # ---------------------------
+ class IfcAnalyzerApp:
+     def __init__(self, root):
+@@
+         # TAB 2: IDS Audit
+         self.tab_ids = ttk.Frame(self.notebook)
+         self.notebook.add(self.tab_ids, text=" IDS Audit (Requirements) ")
+-        self._init_ids_tab()
++        self._init_ids_tab()
++        # TAB 3: Clean / Optimize
++        self.tab_clean = ttk.Frame(self.notebook)
++        self.notebook.add(self.tab_clean, text=" Rensa & optimera ")
++        self._init_clean_tab()
+@@
+     def select_file(self):
+         path = filedialog.askopenfilename(filetypes=[("IFC Files", "*.ifc")])
+         if path:
+             self.filepath = path
+             self.lbl_filename.config(text=os.path.basename(path), fg="black")
+             self.btn_analyze.config(state="normal")
+             # Enable IDS run if IDS file is also loaded
+             if self.ids_path and IDS_AVAILABLE:
+                 self.btn_run_ids.config(state="normal")
++            # Aktivera rensningsfliken
++            if IFC_AVAILABLE:
++                try:
++                    self.btn_preview_clean.config(state="normal")
++                    self.btn_run_clean.config(state="normal")
++                except Exception:
++                    pass
+             self.log(f"Selected IFC: {path}")
+@@
+     def compare_two_ifcs(self):
+         f1 = filedialog.askopenfilename(title="Select FIRST file (Baseline)", filetypes=[("IFC", "*.ifc")])
+         if not f1: return
+         f2 = filedialog.askopenfilename(title="Select SECOND file (New)", filetypes=[("IFC", "*.ifc")])
+         if not f2: return
+         self.log(f"\n--- COMPARING ---\nA: {os.path.basename(f1)}\nB: {os.path.basename(f2)}")
+         def work():
+             self.btn_diff.config(state="disabled")
+             opts = self._gather_options()
+             try:
+                 self.set_status("Analyzing File A...")
+                 rep1 = analyze_ifc(f1, opts, self.cancel_event)
+                 self.set_status("Analyzing File B...")
+                 rep2 = analyze_ifc(f2, opts, self.cancel_event)
+                 diff = diff_reports(rep1, rep2)
+                 self.log(f"\nEntity Change: {diff['summary']['entity_total']['delta']:+,} (Total: {diff['summary']['entity_total']['b']})")
+                 self.log("Top Increases (Type):")
+                 for r in diff["by_type_delta_top10"]:
+                     self.log(f" {r['type']}: {r['delta']:+,} (A:{r['a']} -> B:{r['b']})")
+                 self.log("Top Decreases (Type):")
+                 for r in diff["by_type_delta_bottom10"]:
+                     self.log(f" {r['type']}: {r['delta']:+,} (A:{r['a']} -> B:{r['b']})")
+                 self.set_status("Diff Complete", "green")
+             except Exception as e:
+                 self.log(f"Diff Error: {e}")
+             finally:
+                 self.btn_diff.config(state="normal")
+             threading.Thread(target=work, daemon=True).start()
+-    # --- IDS Audit Logic ---
++    # --- Clean/Optimize Tab (methods) ---
++    def _init_clean_tab(self):
++        # ---- Överdel: val ----
++        opts = tk.Frame(self.tab_clean, pady=8, padx=8)
++        opts.pack(side="top", fill="x")
++        self.var_clean_uncontained = tk.BooleanVar(value=True)
++        self.var_clean_brokenrels = tk.BooleanVar(value=True)
++        self.var_clean_unused_psets = tk.BooleanVar(value=True)
++        self.var_clean_unused_types = tk.BooleanVar(value=True)
++        self.var_clean_unused_materials = tk.BooleanVar(value=True)
++        self.var_clean_unreffed_geom = tk.BooleanVar(value=False)
++        ttk.Checkbutton(opts, text="Objekt utanför byggnadsstrukturen", variable=self.var_clean_uncontained).pack(side="left", padx=6)
++        ttk.Checkbutton(opts, text="Trasiga relationer (IfcRel*)", variable=self.var_clean_brokenrels).pack(side="left", padx=6)
++        ttk.Checkbutton(opts, text="Oanvända Property Sets", variable=self.var_clean_unused_psets).pack(side="left", padx=6)
++        ttk.Checkbutton(opts, text="Oanvända typer", variable=self.var_clean_unused_types).pack(side="left", padx=6)
++        ttk.Checkbutton(opts, text="Oanvända material", variable=self.var_clean_unused_materials).pack(side="left", padx=6)
++        ttk.Checkbutton(opts, text="Orefererad geometri (avancerat)", variable=self.var_clean_unreffed_geom).pack(side="left", padx=6)
++        # ---- Knappar ----
++        ctrl = tk.Frame(self.tab_clean, pady=6, padx=8)
++        ctrl.pack(side="top", fill="x")
++        self.btn_preview_clean = ttk.Button(ctrl, text="Förhandsgranska", command=self.start_preview_cleanup, state="disabled")
++        self.btn_preview_clean.pack(side="left", padx=5)
++        self.btn_run_clean = ttk.Button(ctrl, text="Rensa & spara som…", command=self.start_cleanup_and_save, state="disabled")
++        self.btn_run_clean.pack(side="left", padx=5)
++        self.btn_cancel_clean = ttk.Button(ctrl, text="Avbryt", command=self.cancel_analysis, state="disabled")
++        self.btn_cancel_clean.pack(side="left", padx=5)
++        # ---- Logg ----
++        self.txt_clean = scrolledtext.ScrolledText(self.tab_clean, font=("Consolas", 10), state="disabled")
++        self.txt_clean.pack(fill="both", expand=True, pady=5, padx=8)
++        if self.filepath and IFC_AVAILABLE:
++            self.btn_preview_clean.config(state="normal")
++            self.btn_run_clean.config(state="normal")
++    def _gather_clean_options(self) -> CleanOptions:
++        return CleanOptions(
++            remove_uncontained_products=bool(self.var_clean_uncontained.get()),
++            remove_broken_relationships=bool(self.var_clean_brokenrels.get()),
++            remove_unused_psets=bool(self.var_clean_unused_psets.get()),
++            remove_unused_types=bool(self.var_clean_unused_types.get()),
++            remove_unused_materials=bool(self.var_clean_unused_materials.get()),
++            remove_unreferenced_geometry=bool(self.var_clean_unreffed_geom.get()),
++        )
++    def _log_clean(self, text: str):
++        def _write():
++            self.txt_clean.config(state="normal")
++            self.txt_clean.insert(tk.END, text + "\n")
++            self.txt_clean.see(tk.END)
++            self.txt_clean.config(state="disabled")
++        self.root.after(0, _write)
++    def start_preview_cleanup(self):
++        if not self.filepath or not IFC_AVAILABLE: return
++        self.cancel_event.clear()
++        self.btn_preview_clean.config(state="disabled")
++        self.btn_run_clean.config(state="disabled")
++        self.btn_cancel_clean.config(state="normal")
++        self.txt_clean.config(state="normal"); self.txt_clean.delete(1.0, tk.END); self.txt_clean.config(state="disabled")
++        def work():
++            try:
++                self.set_status("Laddar IFC…")
++                ifc = ifcopenshell.open(self.filepath)
++                opts = self._gather_clean_options()
++                self.set_status("Söker kandidater…")
++                cands = collect_cleanup_candidates(
++                    ifc, self.cancel_event, opts,
++                    progress_cb=lambda f, m: (self.set_progress(f), self.set_status(m))
++                )
++                if self.cancel_event.is_set():
++                    self.set_status("Avbruten", "orange"); return
++                total = sum(len(v) for v in cands.values())
++                self._log_clean("=== FÖRHANDSGRANSKNING AV RENSNING ===")
++                for k, v in cands.items():
++                    self._log_clean(f" {k.replace('_',' ').title():<30}: {len(v):,}")
++                self._log_clean(f"\nSumma kandidater: {total:,}")
++                self._log_clean("\n(Obs: Vid faktisk rensning kan ytterligare entiteter försvinna p.g.a. kaskad/beroenden.)")
++                self.last_cleanup_candidates = cands
++                self.set_status("Förhandsgranskning klar", "green")
++            except Exception as e:
++                self.set_status("Fel vid förhandsgranskning", "red")
++                self._log_clean(f"Fel: {e}")
++            finally:
++                self.btn_preview_clean.config(state="normal")
++                self.btn_run_clean.config(state="normal")
++                self.btn_cancel_clean.config(state="disabled")
++                self.set_progress(1.0)
++        threading.Thread(target=work, daemon=True).start()
++    def start_cleanup_and_save(self):
++        if not self.filepath or not IFC_AVAILABLE: return
++        out = filedialog.asksaveasfilename(
++            defaultextension=".ifc", filetypes=[("IFC", "*.ifc")],
++            title="Spara rensad IFC som…"
++        )
++        if not out: return
++        self.cancel_event.clear()
++        self.btn_preview_clean.config(state="disabled")
++        self.btn_run_clean.config(state="disabled")
++        self.btn_cancel_clean.config(state="normal")
++        self.txt_clean.config(state="normal"); self.txt_clean.delete(1.0, tk.END); self.txt_clean.config(state="disabled")
++        def work():
++            try:
++                self.set_status("Laddar IFC…")
++                ifc = ifcopenshell.open(self.filepath)
++                opts = self._gather_clean_options()
++                cands = getattr(self, "last_cleanup_candidates", None)
++                if not cands:
++                    cands = collect_cleanup_candidates(
++                        ifc, self.cancel_event, opts,
++                        progress_cb=lambda f, m: (self.set_progress(f), self.set_status(m))
++                    )
++                if self.cancel_event.is_set():
++                    self.set_status("Avbruten", "orange"); return
++                self.set_status("Utför rensning…")
++                removed = execute_cleanup(
++                    ifc, cands, opts, self.cancel_event,
++                    progress_cb=lambda f, m: (self.set_progress(f), self.set_status(m))
++                )
++                if self.cancel_event.is_set():
++                    self.set_status("Avbruten", "orange"); return
++                self.set_status("Skriver IFC…")
++                ifc.write(out)
++                self._log_clean("=== RENSNING UTFÖRD ===")
++                for k, v in removed.items():
++                    self._log_clean(f" Borttagna {k.replace('_',' '):<30}: {v:,}")
++                self._log_clean(f"\nSparad till: {out}")
++                self.set_status("Rensning klar", "green")
++            except Exception as e:
++                self.set_status("Fel vid rensning", "red")
++                self._log_clean(f"Fel: {e}")
++            finally:
++                self.btn_preview_clean.config(state="normal")
++                self.btn_run_clean.config(state="normal")
++                self.btn_cancel_clean.config(state="disabled")
++                self.set_progress(1.0)
++        threading.Thread(target=work, daemon=True).start()
++    # --- IDS Audit Logic ---
+     def start_ids_audit(self):
+         if not IDS_AVAILABLE:
+             messagebox.showerror("Missing Library", "ifctester is not installed.\\nRun: pip install ifctester")
+             return

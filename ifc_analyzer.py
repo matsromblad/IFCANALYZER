@@ -1,0 +1,1681 @@
+
+import tkinter as tk
+from tkinter import filedialog, ttk, scrolledtext, messagebox
+import os
+import threading
+import collections
+import time
+import json
+import csv
+from dataclasses import dataclass, asdict
+from typing import Any, Dict, List, Tuple, Optional, Callable
+
+APP_VERSION = "2025.12.4"
+APP_CREDIT = "Created by Mats Romblad, WSP \n IDS by ifctester"
+
+# --- Safe Import for ifcopenshell ---
+IFC_AVAILABLE = False
+try:
+    import ifcopenshell
+    import ifcopenshell.util.element
+    IFC_AVAILABLE = True
+except ImportError:
+    IFC_AVAILABLE = False
+
+# --- Safe Import for ifctester (IDS) ---
+IDS_AVAILABLE = False
+try:
+    import ifctester
+    from ifctester import reporter
+    IDS_AVAILABLE = True
+except ImportError:
+    IDS_AVAILABLE = False
+
+
+# ---------------------------
+# Analysis core (headless)
+# ---------------------------
+@dataclass
+class AnalyzeOptions:
+    deep_orphan_check: bool = False
+    orphan_sample_limit: int = 5000
+    heavy_geom_threshold: int = 100
+    top_n: int = 20
+
+
+def _now_stamp() -> str:
+    return time.strftime("%Y%m%d-%H%M%S")
+
+
+def _safe_str(x: Any) -> str:
+    try:
+        return str(x)
+    except Exception:
+        return "<unprintable>"
+
+
+def _iter_entity_refs(val: Any):
+    """Yield referenced IFC entities found inside Python values."""
+    if hasattr(val, "is_a") and hasattr(val, "id"):
+        yield val
+        return
+    if isinstance(val, (list, tuple)):
+        for v in val:
+            yield from _iter_entity_refs(v)
+    elif isinstance(val, dict):
+        for v in val.values():
+            yield from _iter_entity_refs(v)
+
+
+def estimate_payload(entity: Any, max_list_scan: int = 2000) -> int:
+    score = 16
+    try:
+        info = entity.get_info(include_identifier=False)
+    except Exception:
+        return score + len(getattr(entity, "is_a", lambda: "Unknown")()) * 2
+
+    for k, v in info.items():
+        if v is None:
+            continue
+        score += min(len(_safe_str(k)), 50)
+        if isinstance(v, str):
+            score += len(v)
+        elif isinstance(v, (int, float, bool)):
+            score += 8
+        elif isinstance(v, (list, tuple)):
+            n = len(v)
+            score += 16 + min(n, max_list_scan) * 4
+            if n and isinstance(v[0], (list, tuple)):
+                inner = sum(
+                    min(len(inner), max_list_scan)
+                    for inner in v[:50]
+                    if isinstance(inner, (list, tuple))
+                )
+                score += inner * 2
+        elif isinstance(v, dict):
+            score += 32 + min(len(v), 200) * 8
+        else:
+            score += 24
+
+    # Heavy geometry heuristics
+    try:
+        if entity.is_a("IfcTriangulatedFaceSet"):
+            ci = getattr(entity, "CoordIndex", None)
+            cl = getattr(entity, "CoordList", None)
+            if ci is not None:
+                score += len(ci) * 6
+            if cl is not None:
+                score += len(cl) * 6
+        elif entity.is_a("IfcCartesianPointList3D"):
+            cl = getattr(entity, "CoordList", None)
+            if cl is not None:
+                score += len(cl) * 6
+        elif entity.is_a("IfcConnectedFaceSet"):
+            faces = getattr(entity, "CfsFaces", None)
+            if faces is not None:
+                score += len(faces) * 12
+    except Exception:
+        pass
+
+    return int(score)
+
+
+def classify_entity(entity: Any) -> str:
+    try:
+        if entity.is_a("IfcRepresentationItem"):
+            return "Geometry"
+        if entity.is_a("IfcRepresentation"):
+            return "Geometry"
+        if entity.is_a("IfcRepresentationContext"):
+            return "Geometry"
+
+        if entity.is_a("IfcPropertyAbstraction"):
+            return "Properties"
+        if entity.is_a("IfcPropertyDefinition"):
+            return "Properties"
+        if entity.is_a("IfcOwnerHistory"):
+            return "Metadata"
+        if entity.is_a("IfcRelDefinesByProperties"):
+            return "Properties"
+        if entity.is_a("IfcRelAssociates"):
+            return "Metadata"
+
+        if entity.is_a("IfcProduct"):
+            return "Elements"
+
+        if entity.is_a("IfcRelationship"):
+            return "Relationships"
+
+        return "Core/Structure"
+    except:
+        return "Unknown"
+
+
+def geometry_complexity_score(entity: Any) -> int:
+    try:
+        if entity.is_a("IfcTriangulatedFaceSet"):
+            return len(entity.CoordIndex)
+        if entity.is_a("IfcConnectedFaceSet"):
+            return len(entity.CfsFaces)
+        if entity.is_a("IfcPolyLoop"):
+            return len(entity.Polygon)
+        if entity.is_a("IfcCartesianPointList3D"):
+            return len(entity.CoordList)
+    except Exception:
+        return 0
+    return 0
+
+
+def parse_header_info(ifc_file: Any) -> Dict[str, Any]:
+    header_info = {}
+    try:
+        header_info["SCHEMA"] = getattr(ifc_file, "schema", "Unknown")
+        header = getattr(getattr(ifc_file, "wrapped_data", None), "header", None)
+        if header:
+            fd = getattr(header, "file_description", None)
+            if fd:
+                header_info["ViewDefinition"] = getattr(fd, "description", None)
+                header_info["ImplementationLevel"] = getattr(fd, "implementation_level", None)
+            fn = getattr(header, "file_name", None)
+            if fn:
+                header_info["Name"] = getattr(fn, "name", None)
+                header_info["TimeStamp"] = getattr(fn, "time_stamp", None)
+                header_info["Author"] = getattr(fn, "author", None)
+                header_info["Organization"] = getattr(fn, "organization", None)
+                header_info["Preprocessor"] = getattr(fn, "preprocessor_version", None)
+                header_info["OriginatingSystem"] = getattr(fn, "originating_system", None)
+                header_info["Authorization"] = getattr(fn, "authorization", None)
+            fs = getattr(header, "file_schema", None)
+            if fs:
+                header_info["SchemaIdentifiers"] = getattr(fs, "schema_identifiers", None)
+    except Exception:
+        header_info["Error"] = "Could not parse full header"
+    return header_info
+
+
+def build_referenced_id_set(
+    all_entities: List[Any],
+    cancel_event: threading.Event,
+    progress_cb: Optional[Callable[[float, str], None]] = None,
+    tick: int = 2000
+) -> set:
+    referenced = set()
+    n = len(all_entities)
+
+    for i, ent in enumerate(all_entities):
+        if cancel_event.is_set():
+            break
+        try:
+            info = ent.get_info(include_identifier=False)
+        except Exception:
+            info = {}
+
+        for v in info.values():
+            for ref in _iter_entity_refs(v):
+                try:
+                    referenced.add(ref.id())
+                except Exception:
+                    pass
+
+        if progress_cb and (i % tick == 0):
+            progress_cb(i / max(n, 1), "Building reference graph…")
+
+    return referenced
+
+
+def find_owner_of_geometry_cached(
+    geo_entity: Any,
+    ifc_file: Any,
+    cache: Dict[int, Optional[Any]]
+) -> Optional[Any]:
+    try:
+        gid = geo_entity.id()
+    except Exception:
+        gid = None
+
+    if gid is not None and gid in cache:
+        return cache[gid]
+
+    max_depth = 12
+    visited = set()
+
+    def _trace(ent: Any, depth: int = 0) -> Optional[Any]:
+        if depth > max_depth:
+            return None
+        try:
+            eid = ent.id()
+        except Exception:
+            eid = None
+
+        if eid is not None:
+            if eid in visited:
+                return None
+            visited.add(eid)
+
+        try:
+            inv = ifc_file.get_inverse(ent)
+        except Exception:
+            inv = []
+
+        for parent in inv:
+            if parent.is_a("IfcProduct"):
+                return parent
+
+            if parent.is_a("IfcShapeRepresentation") or \
+               parent.is_a("IfcProductDefinitionShape") or \
+               parent.is_a("IfcRepresentation"):
+                found = _trace(parent, depth + 1)
+                if found:
+                    return found
+
+            if parent.is_a("IfcMappedItem") or parent.is_a("IfcRepresentationMap"):
+                found = _trace(parent, depth + 1)
+                if found:
+                    return found
+
+            if parent.is_a("IfcBooleanResult") or \
+               parent.is_a("IfcCsgSolid") or \
+               parent.is_a("IfcSolidModel"):
+                found = _trace(parent, depth + 1)
+                if found:
+                    return found
+
+        return None
+
+    owner = _trace(geo_entity, 0)
+
+    if gid is not None:
+        cache[gid] = owner
+
+    return owner
+
+
+def analyze_ifc(
+    filepath: str,
+    options: AnalyzeOptions,
+    cancel_event: threading.Event,
+    progress_cb: Optional[Callable[[float, str], None]] = None
+) -> Dict[str, Any]:
+
+    t0 = time.time()
+    ifc_file = ifcopenshell.open(filepath)
+
+    try:
+        all_all = list(ifc_file)
+    except Exception:
+        all_all = ifc_file.by_type("IfcRoot")
+
+    n_total = len(all_all)
+    header_info = parse_header_info(ifc_file)
+
+    entity_counts = collections.Counter()
+    payload_by_type = collections.Counter()
+    payload_by_category = collections.Counter()
+    heavy_geoms: List[Tuple[int, Any, str]] = []
+
+    if progress_cb:
+        progress_cb(0.0, "Scanning entities…")
+
+    tick = 2000
+    for i, ent in enumerate(all_all):
+        if cancel_event.is_set():
+            break
+
+        try:
+            etype = ent.is_a()
+        except Exception:
+            etype = "Unknown"
+
+        entity_counts[etype] += 1
+
+        pl = estimate_payload(ent)
+        payload_by_type[etype] += pl
+
+        cat = classify_entity(ent)
+        payload_by_category[cat] += pl
+
+        score = geometry_complexity_score(ent)
+        if score >= options.heavy_geom_threshold:
+            heavy_geoms.append((score, ent, etype))
+
+        if progress_cb and (i % tick == 0):
+            progress_cb(i / max(n_total, 1), f"Scanning entities… ({i:,}/{n_total:,})")
+
+    # --- Geometry Ownership
+    heavy_geoms_sorted = sorted(heavy_geoms, key=lambda x: x[0], reverse=True)
+    owner_cache: Dict[int, Optional[Any]] = {}
+    heavy_geom_owners = []
+
+    for score, geom_ent, gtype in heavy_geoms_sorted[:max(options.top_n, 10)]:
+        if cancel_event.is_set():
+            break
+
+        owner = find_owner_of_geometry_cached(geom_ent, ifc_file, owner_cache)
+
+        info_dict = {
+            "score": score,
+            "geometry_type": gtype,
+            "geometry_id": geom_ent.id(),
+            "owner_type": None,
+            "owner_globalid": None,
+            "owner_name": None
+        }
+
+        if owner:
+            info_dict["owner_type"] = owner.is_a()
+            info_dict["owner_globalid"] = getattr(owner, "GlobalId", None) or f"#{owner.id()}"
+            info_dict["owner_name"] = getattr(owner, "Name", None) or ""
+
+        heavy_geom_owners.append(info_dict)
+
+    # --- Orphans
+    orphan_total = 0
+    orphan_by_type = collections.Counter()
+
+    if options.deep_orphan_check:
+        if progress_cb:
+            progress_cb(0.92, "Orphan check (deep)…")
+
+        referenced_ids = build_referenced_id_set(all_all, cancel_event, progress_cb)
+
+        for ent in all_all:
+            if cancel_event.is_set():
+                break
+
+            if ent.id() not in referenced_ids:
+                orphan_by_type[ent.is_a()] += 1
+                orphan_total += 1
+
+    else:
+        limit = min(options.orphan_sample_limit, len(all_all))
+
+        if progress_cb:
+            progress_cb(0.92, f"Orphan check (sample {limit:,})…")
+
+        sample = all_all[:limit]
+        referenced_ids = build_referenced_id_set(
+            sample, cancel_event, progress_cb, tick=1000
+        )
+
+        for ent in sample:
+            if cancel_event.is_set():
+                break
+
+            if ent.id() not in referenced_ids:
+                orphan_by_type[ent.is_a()] += 1
+                orphan_total += 1
+
+    # --- Recommendations
+    recommendations = []
+
+    if orphan_total > (n_total * 0.2):
+        recommendations.append(
+            f"High orphan count detected ({orphan_total:,}). "
+            f"Consider using an IFC optimizer to remove unused definitions."
+        )
+
+    if entity_counts["IfcFace"] > 10000 and entity_counts["IfcTriangulatedFaceSet"] < 100:
+        recommendations.append(
+            "Model uses explicit IfcFace topology heavily; converting to "
+            "IfcTriangulatedFaceSet could reduce file size."
+        )
+
+    if entity_counts["IfcPolyline"] > 50000:
+        recommendations.append(
+            "Very high number of IfcPolyline entities. "
+            "May indicate inefficient 3D meshing."
+        )
+
+    top_payload_type = payload_by_type.most_common(1)
+    if top_payload_type and top_payload_type[0][0] == "IfcPropertySingleValue":
+        recommendations.append(
+            "Properties dominate file size. Consider removing unneeded Psets."
+        )
+
+    total_payload = sum(payload_by_type.values())
+    prop_payload = (
+        payload_by_category.get("Properties", 0)
+        + payload_by_category.get("Metadata", 0)
+    )
+
+    if total_payload > 0 and (prop_payload / total_payload) > 0.6:
+        recommendations.append(
+            "Properties & Metadata account for >60% of file weight."
+        )
+
+    report = {
+        "meta": {
+            "filepath": filepath,
+            "filename": os.path.basename(filepath),
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "elapsed_seconds": round(time.time() - t0, 2),
+            "entity_total": n_total,
+            "schema": header_info.get("SCHEMA"),
+        },
+        "header": header_info,
+        "counts": {
+            "by_type_top10": [
+                {"type": k, "count": int(v)}
+                for k, v in entity_counts.most_common(10)
+            ],
+            "full": dict(entity_counts),
+        },
+        "payload": {
+            "total_proxy_bytes": int(total_payload),
+            "by_type_topN": [
+                {"type": k, "proxy_bytes": int(v)}
+                for k, v in payload_by_type.most_common(options.top_n)
+            ],
+            "by_category": dict(payload_by_category),
+        },
+        "geometry": {"heavy_geometry_topN": heavy_geom_owners},
+        "orphans": {
+            "mode": "deep" if options.deep_orphan_check else "sample",
+            "orphan_total": int(orphan_total),
+            "by_type_top": [
+                {"type": k, "count": int(v)}
+                for k, v in orphan_by_type.most_common(15)
+            ],
+        },
+        "recommendations": recommendations,
+    }
+
+    return report
+
+
+def export_report(report: Dict[str, Any], output_dir: str, base_name: str) -> Dict[str, str]:
+    """Exportera analysrapport till JSON och (om finns) CSV för heavy geometry."""
+    if not os.path.isdir(output_dir):
+        return {}
+
+    paths: Dict[str, str] = {}
+
+    # 1) JSON
+    json_path = os.path.join(output_dir, f"{base_name}_report.json")
+    try:
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, default=str)
+        paths["json"] = json_path
+    except Exception:
+        pass
+
+    # 2) CSV (Heavy Geometry)
+    csv_geom_path = os.path.join(output_dir, f"{base_name}_heavy_geometry.csv")
+    try:
+        rows = report.get("geometry", {}).get("heavy_geometry_topN", [])
+        if rows:
+            with open(csv_geom_path, "w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=[
+                        "score",
+                        "geometry_type",
+                        "geometry_id",
+                        "owner_type",
+                        "owner_globalid",
+                        "owner_name",
+                    ],
+                )
+                writer.writeheader()
+                for r in rows:
+                    writer.writerow(r)
+            paths["csv_geometry"] = csv_geom_path
+    except Exception:
+        pass
+
+    return paths
+
+
+def diff_reports(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
+    """Jämför två rapporter (B mot A) och returnerar deltas."""
+    delta_counts = collections.Counter(b["counts"]["full"])
+    delta_counts.subtract(collections.Counter(a["counts"]["full"]))
+
+    return {
+        "meta": {"a": a["meta"]["filepath"], "b": b["meta"]["filepath"]},
+        "summary": {
+            "entity_total": {
+                "a": int(a["meta"]["entity_total"]),
+                "b": int(b["meta"]["entity_total"]),
+                "delta": int(b["meta"]["entity_total"]) - int(a["meta"]["entity_total"]),
+            },
+            "schema_change": a["meta"]["schema"] != b["meta"]["schema"],
+        },
+        "by_type_delta_top10": [
+            {
+                "type": k,
+                "delta": v,
+                "a": a["counts"]["full"].get(k, 0),
+                "b": b["counts"]["full"].get(k, 0),
+            }
+            for k, v in delta_counts.most_common(10)
+            if v != 0
+        ],
+        "by_type_delta_bottom10": [
+            {
+                "type": k,
+                "delta": v,
+                "a": a["counts"]["full"].get(k, 0),
+                "b": b["counts"]["full"].get(k, 0),
+            }
+            for k, v in delta_counts.most_common()[:-10:-1]
+            if v != 0
+        ],
+    }
+
+
+# --- Clean options & helpers -------------------------------------------------
+@dataclass
+class CleanOptions:
+    remove_uncontained_products: bool = True
+    remove_broken_relationships: bool = True
+    remove_unused_psets: bool = True
+    remove_unused_types: bool = True
+    remove_unused_materials: bool = True
+    remove_unreferenced_geometry: bool = False  # avancerat, konservativ default
+
+
+def _is_empty_or_none(v) -> bool:
+    if v is None:
+        return True
+    if isinstance(v, (list, tuple, set)):
+        if len(v) == 0:
+            return True
+        # betraktas som trasigt om någon del pekar på None
+        return any(x is None for x in v)
+    return False
+
+
+def collect_cleanup_candidates(
+    ifc_file,
+    cancel_event: threading.Event,
+    options: CleanOptions,
+    progress_cb: Optional[Callable[[float, str], None]] = None,
+) -> Dict[str, List[Any]]:
+    """
+    Samla kandidater för rensning utan att ändra modellen.
+    Returnerar dict med listor per kategori.
+    """
+    res: Dict[str, List[Any]] = {
+        "uncontained_products": [],
+        "broken_relationships": [],
+        "unused_psets": [],
+        "unused_types": [],
+        "unused_materials": [],
+        "unreferenced_geometry": [],
+    }
+
+    all_entities = list(ifc_file)
+
+    # 1) IfcProduct som inte är inplacerade i spatial struktur
+    if options.remove_uncontained_products and not cancel_event.is_set():
+        if progress_cb:
+            progress_cb(0.05, "Söker objekt utanför byggnadsstrukturen…")
+        for p in ifc_file.by_type("IfcProduct"):
+            if cancel_event.is_set():
+                break
+            if p.is_a() in {"IfcProject", "IfcSite", "IfcBuilding", "IfcBuildingStorey", "IfcSpace"}:
+                continue
+            container = None
+            try:
+                container = ifcopenshell.util.element.get_container(p)
+            except Exception:
+                container = None
+            if not container:
+                res["uncontained_products"].append(p)
+
+    # 2) Trasiga relationer (ändar som saknas eller är tomma)
+    if options.remove_broken_relationships and not cancel_event.is_set():
+        if progress_cb:
+            progress_cb(0.10, "Söker trasiga relationer…")
+        rel_types = (
+            "IfcRelAggregates",
+            "IfcRelContainedInSpatialStructure",
+            "IfcRelDefinesByProperties",
+            "IfcRelAssociatesMaterial",
+            "IfcRelDefinesByType",
+        )
+        for rt in rel_types:
+            for rel in ifc_file.by_type(rt):
+                if cancel_event.is_set():
+                    break
+                ok = True
+                try:
+                    if rt == "IfcRelAggregates":
+                        ok = not (_is_empty_or_none(rel.RelatingObject) or _is_empty_or_none(rel.RelatedObjects))
+                    elif rt == "IfcRelContainedInSpatialStructure":
+                        ok = not (_is_empty_or_none(rel.RelatingStructure) or _is_empty_or_none(rel.RelatedElements))
+                    elif rt == "IfcRelDefinesByProperties":
+                        ok = not (_is_empty_or_none(rel.RelatingPropertyDefinition) or _is_empty_or_none(rel.RelatedObjects))
+                    elif rt == "IfcRelAssociatesMaterial":
+                        ok = not (_is_empty_or_none(rel.RelatingMaterial) or _is_empty_or_none(rel.RelatedObjects))
+                    elif rt == "IfcRelDefinesByType":
+                        ok = not (_is_empty_or_none(rel.RelatingType) or _is_empty_or_none(rel.RelatedObjects))
+                except Exception:
+                    ok = False
+
+                if not ok:
+                    res["broken_relationships"].append(rel)
+
+    # 3) Oanvända PropertySets / ElementQuantity
+    if options.remove_unused_psets and not cancel_event.is_set():
+        if progress_cb:
+            progress_cb(0.18, "Identifierar oanvända Pset/Quantities…")
+        referenced_psets = set()
+        for rel in ifc_file.by_type("IfcRelDefinesByProperties"):
+            if cancel_event.is_set():
+                break
+            pdef = getattr(rel, "RelatingPropertyDefinition", None)
+            if pdef:
+                try:
+                    referenced_psets.add(pdef.id())
+                except Exception:
+                    pass
+
+        for cls in ("IfcPropertySet", "IfcElementQuantity"):
+            for p in ifc_file.by_type(cls):
+                if cancel_event.is_set():
+                    break
+                try:
+                    if p.id() not in referenced_psets:
+                        res["unused_psets"].append(p)
+                except Exception:
+                    pass
+
+    # 4) Oanvända typer
+    if options.remove_unused_types and not cancel_event.is_set():
+        if progress_cb:
+            progress_cb(0.25, "Identifierar oanvända typer…")
+        referenced_types = set()
+        for rel in ifc_file.by_type("IfcRelDefinesByType"):
+            if cancel_event.is_set():
+                break
+            t = getattr(rel, "RelatingType", None)
+            if t:
+                try:
+                    referenced_types.add(t.id())
+                except Exception:
+                    pass
+
+        for t in ifc_file.by_type("IfcTypeObject"):
+            if cancel_event.is_set():
+                break
+            try:
+                if t.id() not in referenced_types:
+                    res["unused_types"].append(t)
+            except Exception:
+                pass
+
+    # 5) Oanvända material
+    if options.remove_unused_materials and not cancel_event.is_set():
+        if progress_cb:
+            progress_cb(0.32, "Identifierar oanvända material…")
+        referenced_materials = set()
+        for rel in ifc_file.by_type("IfcRelAssociatesMaterial"):
+            if cancel_event.is_set():
+                break
+            m = getattr(rel, "RelatingMaterial", None)
+            if m:
+                try:
+                    referenced_materials.add(m.id())
+                except Exception:
+                    pass
+
+        for cls in ("IfcMaterial", "IfcMaterialLayerSet", "IfcMaterialConstituentSet", "IfcMaterialProfileSet"):
+            for m in ifc_file.by_type(cls):
+                if cancel_event.is_set():
+                    break
+                try:
+                    if m.id() not in referenced_materials:
+                        res["unused_materials"].append(m)
+                except Exception:
+                    pass
+
+    # 6) Orefererad geometri (valfritt/avancerat)
+    if options.remove_unreferenced_geometry and not cancel_event.is_set():
+        if progress_cb:
+            progress_cb(0.40, "Bygger referensgraf för geometri…")
+        ref_ids = build_referenced_id_set(all_entities, cancel_event, progress_cb=progress_cb)
+        if not cancel_event.is_set():
+            if progress_cb:
+                progress_cb(0.55, "Söker orefererade representation items…")
+            for ri in ifc_file.by_type("IfcRepresentationItem"):
+                if cancel_event.is_set():
+                    break
+                try:
+                    if ri.id() not in ref_ids:
+                        res["unreferenced_geometry"].append(ri)
+                except Exception:
+                    pass
+
+    if progress_cb:
+        progress_cb(0.60, "Förhandsgranskning klar")
+
+    return res
+
+
+def execute_cleanup(
+    ifc_file,
+    candidates: Dict[str, List[Any]],
+    options: CleanOptions,
+    cancel_event: threading.Event,
+    progress_cb: Optional[Callable[[float, str], None]] = None,
+) -> Dict[str, int]:
+    """
+    Ta bort kandidater i säker ordning.
+    Returnerar en dict med antal borttagna per kategori.
+    """
+    removed = {
+        "broken_relationships": 0,
+        "unreferenced_geometry": 0,
+        "unused_psets": 0,
+        "unused_types": 0,
+        "unused_materials": 0,
+        "uncontained_products": 0,
+    }
+
+    # Ordning minskar risken för referensproblem:
+    order = [
+        ("broken_relationships", options.remove_broken_relationships),
+        ("unreferenced_geometry", options.remove_unreferenced_geometry),
+        ("unused_psets", options.remove_unused_psets),
+        ("unused_types", options.remove_unused_types),
+        ("unused_materials", options.remove_unused_materials),
+        ("uncontained_products", options.remove_uncontained_products),
+    ]
+
+    total_groups = sum(int(bool(flag)) for _, flag in order)
+    step = 0
+
+    for key, flag in order:
+        if cancel_event.is_set():
+            break
+        if not flag:
+            continue
+
+        items = candidates.get(key, [])
+        if not items:
+            step += 1
+            if progress_cb:
+                progress_cb(
+                    0.60 + (0.35 * step / max(total_groups, 1)),
+                    f"Inget att rensa i {key.replace('_', ' ')}",
+                )
+            continue
+
+        if progress_cb:
+            progress_cb(
+                0.60 + (0.35 * step / max(total_groups, 1)),
+                f"Tar bort {len(items):,} från {key.replace('_', ' ')}…",
+            )
+
+        count = 0
+        for ent in items:
+            if cancel_event.is_set():
+                break
+            try:
+                ifc_file.remove(ent)
+                count += 1
+            except Exception:
+                # Kan redan vara borttaget p.g.a. kaskad
+                pass
+
+        removed[key] = count
+        step += 1
+
+    if progress_cb:
+        progress_cb(0.95, "Rensning klar")
+
+    return removed
+
+
+# ---------------------------
+# GUI app
+# ---------------------------
+class IfcAnalyzerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title(f"IFC Analyzer {APP_VERSION}")
+        self.root.geometry("1100x750")
+
+        self.filepath = None
+        self.ids_path = None
+        self.last_report = None
+        self.last_ids_result = None
+
+        self.cancel_event = threading.Event()
+        self.worker_thread = None
+
+        # --- Style ---
+        style = ttk.Style()
+        style.configure("TButton", padding=4)
+        style.configure("TFrame", background="#f0f0f0")
+
+        # --- Top Header ---
+        header = tk.Frame(root, pady=10, bg="white")
+        header.pack(side="top", fill="x")
+        tk.Label(
+            header,
+            text=f"IFC Analyzer {APP_VERSION}",
+            font=("Segoe UI", 18, "bold"),
+            bg="white",
+        ).pack(side="left", padx=20)
+        tk.Label(
+            header,
+            text=APP_CREDIT,
+            font=("Segoe UI", 9),
+            fg="#666666",
+            bg="white",
+        ).pack(side="right", padx=20)
+
+        # --- Global Controls (File Selection) ---
+        global_ctrl = tk.Frame(root, pady=10, padx=20)
+        global_ctrl.pack(side="top", fill="x")
+        tk.Label(global_ctrl, text="Target IFC File:", font=("Segoe UI", 9, "bold")).pack(
+            side="left"
+        )
+        self.lbl_filename = tk.Label(
+            global_ctrl, text="(No file selected)", fg="gray", font=("Consolas", 10)
+        )
+        self.lbl_filename.pack(side="left", padx=10)
+        self.btn_load = ttk.Button(global_ctrl, text="Browse...", command=self.select_file)
+        self.btn_load.pack(side="left")
+
+        # --- Notebook (Tabs) ---
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(fill="both", expand=True, padx=20, pady=10)
+
+        # TAB 1: Health & Stats
+        self.tab_health = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_health, text=" Health & Statistics ")
+        self._init_health_tab()
+
+        # TAB 2: IDS Audit
+        self.tab_ids = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_ids, text=" IDS Audit (Requirements) ")
+        self._init_ids_tab()
+
+        # TAB 3: Clean / Optimize
+        self.tab_clean = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_clean, text=" Rensa & optimera ")
+        self._init_clean_tab()
+
+        # --- Footer Status ---
+        status = tk.Frame(root)
+        status.pack(side="top", fill="x", padx=20, pady=(0, 6))
+        self.lbl_status = ttk.Label(status, text=f"Ready", foreground="blue")
+        self.lbl_status.pack(side="left")
+        self.progress = ttk.Progressbar(
+            status, orient="horizontal", length=300, mode="determinate"
+        )
+        self.progress.pack(side="right")
+
+        if not IFC_AVAILABLE:
+            self.show_missing_dependency_ui()
+
+    def _init_health_tab(self):
+        # Controls Row
+        controls = tk.Frame(self.tab_health, pady=6)
+        controls.pack(side="top", fill="x")
+
+        self.btn_analyze = ttk.Button(
+            controls, text="Run Analysis", command=self.start_analysis, state="disabled"
+        )
+        self.btn_analyze.pack(side="left", padx=5)
+
+        self.btn_cancel = ttk.Button(
+            controls, text="Cancel", command=self.cancel_analysis, state="disabled"
+        )
+        self.btn_cancel.pack(side="left", padx=5)
+
+        ttk.Separator(controls, orient="vertical").pack(side="left", fill="y", padx=8)
+
+        self.btn_batch = ttk.Button(
+            controls, text="Batch Folder", command=self.batch_analyze_folder
+        )
+        self.btn_batch.pack(side="left", padx=5)
+
+        self.btn_diff = ttk.Button(
+            controls, text="Diff Two IFCs", command=self.compare_two_ifcs
+        )
+        self.btn_diff.pack(side="left", padx=5)
+
+        ttk.Separator(controls, orient="vertical").pack(side="left", fill="y", padx=8)
+
+        self.btn_export = ttk.Button(
+            controls, text="Export JSON/CSV", command=self.export_last_report, state="disabled"
+        )
+        self.btn_export.pack(side="left", padx=5)
+
+        # Options Row
+        opts = tk.Frame(self.tab_health, pady=6)
+        opts.pack(side="top", fill="x")
+
+        self.var_deep_orphans = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            opts, text="Deep orphan check", variable=self.var_deep_orphans
+        ).pack(side="left", padx=5)
+
+        tk.Label(opts, text="Sample limit:").pack(side="left", padx=(15, 5))
+        self.var_sample_limit = tk.StringVar(value="5000")
+        ttk.Entry(opts, textvariable=self.var_sample_limit, width=8).pack(side="left")
+
+        # Output
+        self.txt_output = scrolledtext.ScrolledText(
+            self.tab_health, font=("Consolas", 10), state="disabled"
+        )
+        self.txt_output.pack(fill="both", expand=True, pady=5)
+
+    def _init_ids_tab(self):
+        # Header / Info
+        info_frame = tk.Frame(self.tab_ids, pady=10)
+        info_frame.pack(side="top", fill="x", padx=5)
+        lbl = tk.Label(
+            info_frame,
+            text="Validate the model against an Information Delivery Specification (IDS).",
+            font=("Segoe UI", 10, "italic"),
+            fg="#555",
+        )
+        lbl.pack(side="left")
+
+        if not IDS_AVAILABLE:
+            warning = tk.Label(
+                info_frame,
+                text="(Missing library: 'pip install ifctester')",
+                fg="red",
+                font=("Segoe UI", 10, "bold"),
+            )
+            warning.pack(side="left", padx=10)
+
+        # Controls
+        ctrl = tk.Frame(self.tab_ids, pady=5)
+        ctrl.pack(side="top", fill="x", padx=5)
+
+        tk.Label(ctrl, text="IDS File:").pack(side="left")
+        self.lbl_ids_file = tk.Label(ctrl, text="(None)", fg="gray", font=("Consolas", 10))
+        self.lbl_ids_file.pack(side="left", padx=5)
+
+        self.btn_load_ids = ttk.Button(ctrl, text="Select .IDS", command=self.select_ids_file)
+        self.btn_load_ids.pack(side="left", padx=5)
+
+        ttk.Separator(ctrl, orient="vertical").pack(side="left", fill="y", padx=15)
+
+        self.btn_run_ids = ttk.Button(
+            ctrl, text="Execute Audit", command=self.start_ids_audit, state="disabled"
+        )
+        self.btn_run_ids.pack(side="left", padx=5)
+
+        self.btn_save_ids_html = ttk.Button(
+            ctrl, text="Save HTML Report", command=self.save_ids_html, state="disabled"
+        )
+        self.btn_save_ids_html.pack(side="left", padx=5)
+
+        # Results Display (Treeview)
+        tree_frame = tk.Frame(self.tab_ids)
+        tree_frame.pack(fill="both", expand=True, pady=5)
+
+        cols = ("status", "spec", "entity", "message")
+        self.ids_tree = ttk.Treeview(tree_frame, columns=cols, show="headings")
+        self.ids_tree.heading("status", text="Status")
+        self.ids_tree.heading("spec", text="Specification")
+        self.ids_tree.heading("entity", text="Entity")
+        self.ids_tree.heading("message", text="Requirement")
+        self.ids_tree.column("status", width=80, anchor="center")
+        self.ids_tree.column("spec", width=200)
+        self.ids_tree.column("entity", width=150)
+        self.ids_tree.column("message", width=400)
+
+        sb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.ids_tree.yview)
+        self.ids_tree.configure(yscrollcommand=sb.set)
+        self.ids_tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        # Tags for coloring
+        self.ids_tree.tag_configure("PASS", foreground="green")
+        self.ids_tree.tag_configure("FAIL", foreground="red")
+        self.ids_tree.tag_configure("WARNING", foreground="orange")
+
+    # --- Utility Methods ---
+    def show_missing_dependency_ui(self):
+        self.log("ERROR: ifcopenshell is not installed.\n")
+        self.btn_load.config(state="disabled")
+
+    def log(self, message: str):
+        def _write():
+            self.txt_output.config(state="normal")
+            self.txt_output.insert(tk.END, message + "\n")
+            self.txt_output.see(tk.END)
+            self.txt_output.config(state="disabled")
+
+        self.root.after(0, _write)
+
+    def set_status(self, text: str, color: str = "blue"):
+        def _s():
+            self.lbl_status.config(text=text, foreground=color)
+
+        self.root.after(0, _s)
+
+    def set_progress(self, frac: float):
+        def _p():
+            self.progress["value"] = max(0.0, min(100.0, frac * 100.0))
+
+        self.root.after(0, _p)
+
+    def select_file(self):
+        path = filedialog.askopenfilename(filetypes=[("IFC Files", "*.ifc")])
+        if path:
+            self.filepath = path
+            self.lbl_filename.config(text=os.path.basename(path), fg="black")
+            self.btn_analyze.config(state="normal")
+
+            # Enable IDS run if IDS file is also loaded
+            if self.ids_path and IDS_AVAILABLE:
+                self.btn_run_ids.config(state="normal")
+
+            # Aktivera rensningsfliken (om ifcopenshell finns)
+            if IFC_AVAILABLE:
+                try:
+                    self.btn_preview_clean.config(state="normal")
+                    self.btn_run_clean.config(state="normal")
+                except Exception:
+                    pass
+
+            self.log(f"Selected IFC: {path}")
+
+    def select_ids_file(self):
+        path = filedialog.askopenfilename(filetypes=[("IDS Files", "*.ids"), ("XML Files", "*.xml")])
+        if path:
+            self.ids_path = path
+            self.lbl_ids_file.config(text=os.path.basename(path), fg="black")
+            if self.filepath and IDS_AVAILABLE:
+                self.btn_run_ids.config(state="normal")
+
+    # --- Health Analysis Logic ---
+    def _gather_options(self) -> AnalyzeOptions:
+        try:
+            sl = int(self.var_sample_limit.get())
+        except Exception:
+            sl = 5000
+        return AnalyzeOptions(
+            deep_orphan_check=bool(self.var_deep_orphans.get()),
+            orphan_sample_limit=sl,
+        )
+
+    def start_analysis(self):
+        if not self.filepath:
+            return
+        self.cancel_event.clear()
+        self.btn_analyze.config(state="disabled")
+        self.btn_cancel.config(state="normal")
+        self.txt_output.config(state="normal")
+        self.txt_output.delete(1.0, tk.END)
+        self.txt_output.config(state="disabled")
+
+        def work():
+            try:
+                report = analyze_ifc(
+                    self.filepath,
+                    self._gather_options(),
+                    self.cancel_event,
+                    progress_cb=lambda f, m: (self.set_progress(f), self.set_status(m)),
+                )
+                if self.cancel_event.is_set():
+                    self.set_status("Cancelled", "orange")
+                else:
+                    self.last_report = report
+                    self.render_report(report)
+                    self.set_status("Analysis Done", "green")
+                    self.btn_export.config(state="normal")
+            except Exception as e:
+                self.set_status("Error", "red")
+                self.log(f"Error: {e}")
+            finally:
+                self.btn_analyze.config(state="normal")
+                self.btn_cancel.config(state="disabled")
+                self.set_progress(1.0)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def render_report(self, report: Dict[str, Any]):
+        self.log(f"=== ANALYSIS REPORT: {report['meta']['filename']} ===")
+        self.log(f"Analysis Date: {report['meta']['generated_at']}")
+
+        # Header Dump
+        self.log("\n--- File Header ---")
+        h = report["header"]
+        if h:
+            for k, v in h.items():
+                if v:
+                    val = str(v)
+                    if isinstance(v, (list, tuple)):
+                        val = ", ".join(map(str, v))
+                    self.log(f" {k}: {val}")
+        else:
+            self.log(" (No header info extracted)")
+
+        self.log(f"\nTotal Entities: {report['meta']['entity_total']:,}")
+
+        # Data Categories (Percentage)
+        self.log("\n--- Data Category Breakdown (Estimated Weight) ---")
+        total_load = report["payload"]["total_proxy_bytes"]
+        cats = report["payload"]["by_category"]
+        if total_load > 0:
+            for cat, val in sorted(cats.items(), key=lambda x: x[1], reverse=True):
+                pct = (val / total_load) * 100
+                self.log(f" {cat:<15}: {pct:5.1f}% ({val:,})")
+        else:
+            self.log(" (No payload data available)")
+
+        self.log("\n--- Top 10 Entity Types (Count) ---")
+        for r in report["counts"]["by_type_top10"]:
+            self.log(f" {r['type']:<30} : {r['count']:,}")
+
+        self.log("\n--- Top Contributors to File Size (Type) ---")
+        for r in report["payload"]["by_type_topN"][:10]:
+            self.log(f" {r['type']:<30} : {r['proxy_bytes']:,}")
+
+        self.log("\n--- Geometry Complexity (Top 10 Heavy Objects) ---")
+        if not report["geometry"]["heavy_geometry_topN"]:
+            self.log(" (No significantly heavy geometry found)")
+        else:
+            for i, r in enumerate(report["geometry"]["heavy_geometry_topN"]):
+                owner = r["owner_name"] if r["owner_name"] else r["owner_type"]
+                self.log(
+                    f" #{i+1} [Score {r['score']}] {r['geometry_type']} -> "
+                    f"Owner: {owner} ({r['owner_globalid']})"
+                )
+
+        self.log("\n--- Orphan Analysis ---")
+        self.log(f"Mode: {report['orphans']['mode']}")
+        self.log(f"Total Orphans: {report['orphans']['orphan_total']:,}")
+        if report["orphans"]["by_type_top"]:
+            for r in report["orphans"]["by_type_top"]:
+                self.log(f" {r['type']:<30} : {r['count']:,}")
+
+        if report["recommendations"]:
+            self.log("\n!!! RECOMMENDATIONS !!!")
+            for rec in report["recommendations"]:
+                self.log(f" * {rec}")
+        else:
+            self.log("\n(No specific warnings found)")
+
+        self.log("\n[End of Report]")
+
+
+    def cancel_analysis(self):
+        self.cancel_event.set()
+
+    def batch_analyze_folder(self):
+        d = filedialog.askdirectory()
+        if not d:
+            return
+
+        self.log(f"\n--- BATCH ANALYSIS: {d} ---")
+        files = [f for f in os.listdir(d) if f.lower().endswith(".ifc")]
+        self.log(f"Found {len(files)} IFC files.")
+
+        def work():
+            self.btn_batch.config(state="disabled")
+            opts = self._gather_options()
+            opts.deep_orphan_check = False  # Disable deep mode for batch
+
+            summary_data = []
+            for i, fname in enumerate(files):
+                if self.cancel_event.is_set():
+                    break
+
+                fpath = os.path.join(d, fname)
+                self.set_status(f"Batch {i+1}/{len(files)}: {fname}")
+
+                try:
+                    rep = analyze_ifc(fpath, opts, self.cancel_event)
+                    line = (
+                        f"{fname}: {rep['meta']['entity_total']} ents, "
+                        f"{rep['payload']['total_proxy_bytes']} load"
+                    )
+                    self.log(line)
+                    summary_data.append(rep)
+
+                except Exception as e:
+                    self.log(f"Failed {fname}: {e}")
+
+            self.set_status("Batch Done", "green")
+            self.btn_batch.config(state="normal")
+
+            # Batch summary CSV
+            if summary_data:
+                csv_path = os.path.join(d, f"batch_summary_{_now_stamp()}.csv")
+                try:
+                    with open(csv_path, "w", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["Filename", "Entities", "PayloadScore", "Orphans", "Schema"])
+                        for r in summary_data:
+                            writer.writerow(
+                                [
+                                    r["meta"]["filename"],
+                                    r["meta"]["entity_total"],
+                                    r["payload"]["total_proxy_bytes"],
+                                    r["orphans"]["orphan_total"],
+                                    r["meta"]["schema"],
+                                ]
+                            )
+                    self.log(f"\nBatch summary saved: {csv_path}")
+                except Exception:
+                    pass
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def export_last_report(self):
+        if not self.last_report:
+            return
+
+        out_dir = filedialog.askdirectory()
+        if not out_dir:
+            return
+
+        base = os.path.splitext(self.last_report["meta"]["filename"])[0] + "_" + _now_stamp()
+        paths = export_report(self.last_report, out_dir, base)
+
+        msg = "Exported:\n" + "\n".join(paths.values())
+        messagebox.showinfo("Export Success", msg)
+
+    def compare_two_ifcs(self):
+        f1 = filedialog.askopenfilename(
+            title="Select FIRST file (Baseline)", filetypes=[("IFC", "*.ifc")]
+        )
+        if not f1:
+            return
+        f2 = filedialog.askopenfilename(
+            title="Select SECOND file (New)", filetypes=[("IFC", "*.ifc")]
+        )
+        if not f2:
+            return
+
+        self.log(f"\n--- COMPARING ---\nA: {os.path.basename(f1)}\nB: {os.path.basename(f2)}")
+
+        def work():
+            self.btn_diff.config(state="disabled")
+            opts = self._gather_options()
+
+            try:
+                self.set_status("Analyzing File A...")
+                rep1 = analyze_ifc(f1, opts, self.cancel_event)
+
+                self.set_status("Analyzing File B...")
+                rep2 = analyze_ifc(f2, opts, self.cancel_event)
+
+                diff = diff_reports(rep1, rep2)
+
+                self.log(
+                    f"\nEntity Change: "
+                    f"{diff['summary']['entity_total']['delta']:+,} "
+                    f"(Total: {diff['summary']['entity_total']['b']})"
+                )
+
+                self.log("Top Increases (Type):")
+                for r in diff["by_type_delta_top10"]:
+                    self.log(
+                        f" {r['type']}: {r['delta']:+,} "
+                        f"(A:{r['a']} -> B:{r['b']})"
+                    )
+
+                self.log("Top Decreases (Type):")
+                for r in diff["by_type_delta_bottom10"]:
+                    self.log(
+                        f" {r['type']}: {r['delta']:+,} "
+                        f"(A:{r['a']} -> B:{r['b']})"
+                    )
+
+                self.set_status("Diff Complete", "green")
+
+            except Exception as e:
+                self.log(f"Diff Error: {e}")
+
+            finally:
+                self.btn_diff.config(state="normal")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # --- Clean/Optimize Tab (methods) ---
+    def _init_clean_tab(self):
+        # Överdel – checkboxar
+        opts = tk.Frame(self.tab_clean, pady=8, padx=8)
+        opts.pack(side="top", fill="x")
+
+        self.var_clean_uncontained = tk.BooleanVar(value=True)
+        self.var_clean_brokenrels = tk.BooleanVar(value=True)
+        self.var_clean_unused_psets = tk.BooleanVar(value=True)
+        self.var_clean_unused_types = tk.BooleanVar(value=True)
+        self.var_clean_unused_materials = tk.BooleanVar(value=True)
+        self.var_clean_unreffed_geom = tk.BooleanVar(value=False)
+
+        ttk.Checkbutton(
+            opts, text="Objekt utanför byggnadsstrukturen",
+            variable=self.var_clean_uncontained
+        ).pack(side="left", padx=6)
+
+        ttk.Checkbutton(
+            opts, text="Trasiga relationer (IfcRel*)",
+            variable=self.var_clean_brokenrels
+        ).pack(side="left", padx=6)
+
+        ttk.Checkbutton(
+            opts, text="Oanvända Property Sets",
+            variable=self.var_clean_unused_psets
+        ).pack(side="left", padx=6)
+
+        ttk.Checkbutton(
+            opts, text="Oanvända typer",
+            variable=self.var_clean_unused_types
+        ).pack(side="left", padx=6)
+
+        ttk.Checkbutton(
+            opts, text="Oanvända material",
+            variable=self.var_clean_unused_materials
+        ).pack(side="left", padx=6)
+
+        ttk.Checkbutton(
+            opts, text="Orefererad geometri (avancerat)",
+            variable=self.var_clean_unreffed_geom
+        ).pack(side="left", padx=6)
+
+        # Knappar
+        ctrl = tk.Frame(self.tab_clean, pady=6, padx=8)
+        ctrl.pack(side="top", fill="x")
+
+        self.btn_preview_clean = ttk.Button(
+            ctrl, text="Förhandsgranska",
+            command=self.start_preview_cleanup,
+            state="disabled"
+        )
+        self.btn_preview_clean.pack(side="left", padx=5)
+
+        self.btn_run_clean = ttk.Button(
+            ctrl, text="Rensa & spara som…",
+            command=self.start_cleanup_and_save,
+            state="disabled"
+        )
+        self.btn_run_clean.pack(side="left", padx=5)
+
+        self.btn_cancel_clean = ttk.Button(
+            ctrl, text="Avbryt",
+            command=self.cancel_analysis,
+            state="disabled"
+        )
+        self.btn_cancel_clean.pack(side="left", padx=5)
+
+        # Logg
+        self.txt_clean = scrolledtext.ScrolledText(
+            self.tab_clean,
+            font=("Consolas", 10),
+            state="disabled"
+        )
+        self.txt_clean.pack(fill="both", expand=True, pady=5, padx=8)
+
+        # Aktivering när IFC valts
+        if self.filepath and IFC_AVAILABLE:
+            self.btn_preview_clean.config(state="normal")
+            self.btn_run_clean.config(state="normal")
+
+    def _gather_clean_options(self) -> CleanOptions:
+        return CleanOptions(
+            remove_uncontained_products=self.var_clean_uncontained.get(),
+            remove_broken_relationships=self.var_clean_brokenrels.get(),
+            remove_unused_psets=self.var_clean_unused_psets.get(),
+            remove_unused_types=self.var_clean_unused_types.get(),
+            remove_unused_materials=self.var_clean_unused_materials.get(),
+            remove_unreferenced_geometry=self.var_clean_unreffed_geom.get(),
+        )
+
+    def _log_clean(self, text: str):
+        def _write():
+            self.txt_clean.config(state="normal")
+            self.txt_clean.insert(tk.END, text + "\n")
+            self.txt_clean.see(tk.END)
+            self.txt_clean.config(state="disabled")
+        self.root.after(0, _write)
+
+    def start_preview_cleanup(self):
+        if not self.filepath or not IFC_AVAILABLE:
+            return
+
+        self.cancel_event.clear()
+        self.btn_preview_clean.config(state="disabled")
+        self.btn_run_clean.config(state="disabled")
+        self.btn_cancel_clean.config(state="normal")
+
+        self.txt_clean.config(state="normal")
+        self.txt_clean.delete(1.0, tk.END)
+        self.txt_clean.config(state="disabled")
+
+        def work():
+            try:
+                self.set_status("Laddar IFC…")
+                ifc = ifcopenshell.open(self.filepath)
+
+                opts = self._gather_clean_options()
+                self.set_status("Söker kandidater…")
+
+                cands = collect_cleanup_candidates(
+                    ifc, self.cancel_event, opts,
+                    progress_cb=lambda f, m: (
+                        self.set_progress(f),
+                        self.set_status(m),
+                    )
+                )
+
+                if self.cancel_event.is_set():
+                    self.set_status("Avbruten", "orange")
+                    return
+
+                total = sum(len(v) for v in cands.values())
+                self._log_clean("=== FÖRHANDSGRANSKNING AV RENSNING ===")
+
+                for k, v in cands.items():
+                    self._log_clean(f" {k.replace('_',' ').title():<30}: {len(v):,}")
+
+                self._log_clean(f"\nSumma kandidater: {total:,}")
+                self._log_clean(
+                    "\n(Obs: Vid faktisk rensning kan fler entiteter "
+                    "försvinna p.g.a. kaskad/beroenden.)"
+                )
+
+                self.last_cleanup_candidates = cands
+                self.set_status("Förhandsgranskning klar", "green")
+
+            except Exception as e:
+                self.set_status("Fel vid förhandsgranskning", "red")
+                self._log_clean(f"Fel: {e}")
+
+            finally:
+                self.btn_preview_clean.config(state="normal")
+                self.btn_run_clean.config(state="normal")
+                self.btn_cancel_clean.config(state="disabled")
+                self.set_progress(1.0)
+
+        threading.Thread(target=work, daemon=True).start()
+
+
+    def start_cleanup_and_save(self):
+        if not self.filepath or not IFC_AVAILABLE:
+            return
+
+        out = filedialog.asksaveasfilename(
+            defaultextension=".ifc",
+            filetypes=[("IFC", "*.ifc")],
+            title="Spara rensad IFC som…"
+        )
+        if not out:
+            return
+
+        self.cancel_event.clear()
+        self.btn_preview_clean.config(state="disabled")
+        self.btn_run_clean.config(state="disabled")
+        self.btn_cancel_clean.config(state="normal")
+
+        self.txt_clean.config(state="normal")
+        self.txt_clean.delete(1.0, tk.END)
+        self.txt_clean.config(state="disabled")
+
+        def work():
+            try:
+                self.set_status("Laddar IFC…")
+                ifc = ifcopenshell.open(self.filepath)
+
+                opts = self._gather_clean_options()
+
+                # Hämta senaste kandidatlista eller skapa ny
+                cands = getattr(self, "last_cleanup_candidates", None)
+                if not cands:
+                    cands = collect_cleanup_candidates(
+                        ifc,
+                        self.cancel_event,
+                        opts,
+                        progress_cb=lambda f, m: (self.set_progress(f), self.set_status(m)),
+                    )
+
+                if self.cancel_event.is_set():
+                    self.set_status("Avbruten", "orange")
+                    return
+
+                self.set_status("Utför rensning…")
+
+                removed = execute_cleanup(
+                    ifc,
+                    cands,
+                    opts,
+                    self.cancel_event,
+                    progress_cb=lambda f, m: (self.set_progress(f), self.set_status(m)),
+                )
+
+                if self.cancel_event.is_set():
+                    self.set_status("Avbruten", "orange")
+                    return
+
+                self.set_status("Skriver IFC…")
+                ifc.write(out)
+
+                self._log_clean("=== RENSNING UTFÖRD ===")
+                for k, v in removed.items():
+                    self._log_clean(f" Borttagna {k.replace('_',' '):<30}: {v:,}")
+
+                self._log_clean(f"\nSparad till: {out}")
+                self.set_status("Rensning klar", "green")
+
+            except Exception as e:
+                self.set_status("Fel vid rensning", "red")
+                self._log_clean(f"Fel: {e}")
+
+            finally:
+                self.btn_preview_clean.config(state="normal")
+                self.btn_run_clean.config(state="normal")
+                self.btn_cancel_clean.config(state="disabled")
+                self.set_progress(1.0)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # --- IDS Audit Logic ---
+    def start_ids_audit(self):
+        if not IDS_AVAILABLE:
+            messagebox.showerror(
+                "Missing Library",
+                "ifctester is not installed.\nRun: pip install ifctester",
+            )
+            return
+
+        self.ids_tree.delete(*self.ids_tree.get_children())
+
+        self.btn_run_ids.config(state="disabled")
+        self.btn_save_ids_html.config(state="disabled")
+
+        self.set_status("Running IDS Audit...", "blue")
+
+        def work():
+            try:
+                # 1. Load IDS
+                my_ids = ifctester.open(self.ids_path)
+
+                # 2. Load IFC
+                self.set_status("Loading IFC for IDS...", "blue")
+                ifc = ifcopenshell.open(self.filepath)
+
+                # 3. Validate
+                self.set_status("Validating requirements...", "blue")
+                my_ids.validate(ifc)
+
+                # 4. Show results
+                self.root.after(0, lambda: self._display_ids_results(my_ids))
+
+            except Exception as e:
+                self.root.after(
+                    0, lambda: messagebox.showerror("IDS Error", str(e))
+                )
+                self.set_status("IDS Error", "red")
+
+            finally:
+                self.root.after(
+                    0, lambda: self.btn_run_ids.config(state="normal")
+                )
+                self.set_progress(1.0)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _display_ids_results(self, ids_object):
+        self.last_ids_result = ids_object
+
+        total_pass = 0
+        total_fail = 0
+
+        for spec in ids_object.specifications:
+            status_str = "PASS" if spec.status else "FAIL"
+
+            if spec.status:
+                total_pass += 1
+            else:
+                total_fail += 1
+                self.ids_tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        status_str,
+                        spec.name,
+                        "See HTML Report",
+                        "Requirements not met",
+                    ),
+                    tags=(status_str,),
+                )
+
+        summary = f"Audit Complete. Specs Passed: {total_pass}  Failed: {total_fail}"
+        color = "green" if total_fail == 0 else "red"
+        self.set_status(summary, color)
+
+        if total_fail == 0 and total_pass > 0:
+            self.ids_tree.insert(
+                "",
+                "end",
+                values=("PASS", "All Specifications", "-", "All checks passed successfully"),
+                tags=("PASS",),
+            )
+            self.btn_save_ids_html.config(state="normal")
+
+    def save_ids_html(self):
+        if not self.last_ids_result:
+            return
+
+        f = filedialog.asksaveasfilename(
+            defaultextension=".html",
+            filetypes=[("HTML Files", "*.html")]
+        )
+        if f:
+            try:
+                reporter.Html(self.last_ids_result).to_file(f)
+                messagebox.showinfo("Saved", f"Report saved to {f}")
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+
+# --- Main Guard ---
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = IfcAnalyzerApp(root)
+    root.mainloop()
