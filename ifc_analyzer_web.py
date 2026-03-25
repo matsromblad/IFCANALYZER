@@ -34,30 +34,30 @@ def detect_exporter(report):
 def ai_recommendations(report):
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        return ["Ingen GEMINI_API_KEY i miljön. Sätt den och starta om appen."]
+        return ["No GEMINI_API_KEY set in environment. Set it and restart the app."]
 
     exporter = detect_exporter(report)
     orphans = report.get("orphans", {}).get("orphan_total", 0)
     heavy = len(report.get("geometry", {}).get("heavy_geometry_topN", []))
 
-    # Exempel prompt (fyll på med din egen Gemini-klient i produktionskod):
+    # Example prompt (implement with real Gemini client in production):
     prompt = (
-        "Du får IFC-analysdata från en modell exporterat från %s. "
+        "IFC analysis data from model exported by %s. "
         "Entity count: %s, orphans: %s, heavy geom candidates: %s. "
-        "Ge konkreta förbättringsförslag för IFC-export och filrensning."
+        "Provide improvement suggestions for IFC export and file cleanup."
     ) % (exporter, report.get("meta", {}).get("entity_total", "?"), orphans, heavy)
 
-    # TODO: Byt ut mot riktig Gemini-API-anrop t.ex. via openai/vertex-ai client.
+    # TODO: Replace with real Gemini API call e.g. via openai/vertex-ai client.
     # requests.post('https://gemini.googleapis.com/...', headers={'Authorization': 'Bearer ' + api_key}, json={...})
 
-    # Fallback: och ge lite defensiva generella tips.
+    # Fallback: provide general tips.
     result = [
-        f"Exportör uppskattad till: {exporter}",
-        f"Orphan-objekt: {orphans} (<=20% är normalt).",
-        f"Tunga geometriobjekt: {heavy}. Kontrollera topplistorna.",
+        f"Detected exporter: {exporter}",
+        f"Orphan objects: {orphans} (<=20% is normal).",
+        f"Heavy geometry objects: {heavy}. Check top lists for details.",
     ]
     result.extend(report.get("recommendations", []))
-    result.append("(AI-analys nyckelverifierad, standardrekommendationer.)")
+    result.append("(AI analysis key verified, standard recommendations.)")
     return result
 
 BASE_CSS = """
@@ -116,7 +116,7 @@ header h1 {
 
 UPLOAD_FORM = """
 <!doctype html>
-<html lang="sv">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <title>IFC Analyzer Web</title>
@@ -126,28 +126,28 @@ UPLOAD_FORM = """
   <div class="container">
     <header>
       <h1>IFC Analyzer Web</h1>
-      <p>Ladda upp en IFC-modell för analys och få en resultatsida med sammanfattning.</p>
+      <p>Upload an IFC model for analysis and get a comprehensive results page with summary.</p>
     </header>
 
     <section class="card">
       <form method="post" action="/upload" enctype="multipart/form-data">
         <div>
-          <label for="ifc_file"><strong>Välj IFC-fil</strong></label><br>
+          <label for="ifc_file"><strong>Select IFC File</strong></label><br>
           <input type="file" id="ifc_file" name="ifc_file" accept=".ifc,.ifczip,.ifcz" required>
         </div>
         <div style="margin: 12px 0;">
-          <label><input type="checkbox" name="deep_orphan_check" value="1"> Djup orphan-kontroll</label>
+          <label><input type="checkbox" name="deep_orphan_check" value="1"> Perform deep orphan check</label>
         </div>
-        <button class="btn-primary" type="submit">Analysera</button>
+        <button class="btn-primary" type="submit">Analyze</button>
       </form>
     </section>
 
     <section class="card">
-      <h2>Instruktioner</h2>
+      <h2>Instructions</h2>
       <ul>
-        <li>Max filstorlek: 1 GB.</li>
-        <li>Resultatet visas direkt som HTML (fortfarande JSON-data under huven).</li>
-        <li>För större dataset: kör gärna lokalt med Python/Flask.</li>
+        <li>Max file size: 1 GB.</li>
+        <li>Results are displayed as HTML (JSON data is still available under the hood).</li>
+        <li>For larger datasets: consider running locally with Python/Flask.</li>
       </ul>
     </section>
   </div>
@@ -157,41 +157,41 @@ UPLOAD_FORM = """
 
 REPORT_TEMPLATE = """
 <!doctype html>
-<html lang="sv">
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>IFC Analyzer Resultat</title>
+  <title>IFC Analyzer Report</title>
   <style>""" + BASE_CSS + """</style>
 </head>
 <body>
   <div class="container">
     <header>
-      <h1>IFC Analyzer Resultat</h1>
-      <p>Fil: <strong>{{ report['meta']['filename'] }}</strong> ({{ report['meta']['filepath'] }})</p>
-      <p>Schema: <strong>{{ report['meta']['schema'] or 'okänt' }}</strong> · Elapsed: <strong>{{ report['meta']['elapsed_seconds'] }} s</strong></p>
-      <p><a href="/">← Ny analys</a></p>
+      <h1>IFC Analyzer Report</h1>
+      <p>File: <strong>{{ report['meta']['filename'] }}</strong> ({{ report['meta']['filepath'] }})</p>
+      <p>Schema: <strong>{{ report['meta']['schema'] or 'unknown' }}</strong> · Elapsed: <strong>{{ report['meta']['elapsed_seconds'] }} s</strong></p>
+      <p><a href="/">← New Analysis</a></p>
     </header>
 
     <section class="card">
-      <h2>Sammanfattning</h2>
-      <div><span class="report-key">Entiteter totalt:</span> <span class="report-value">{{ report['meta']['entity_total'] }}</span></div>
+      <h2>Summary</h2>
+      <div><span class="report-key">Total Entities:</span> <span class="report-value">{{ report['meta']['entity_total'] }}</span></div>
       <div><span class="report-key">Orphans:</span> <span class="report-value">{{ report['orphans']['orphan_total'] }} ({{ report['orphans']['mode'] }})</span></div>
-      <div><span class="report-key">Rekommendationer:</span>
+      <div><span class="report-key">Recommendations:</span>
         <ul>
           {% for rec in report['recommendations'] %}
             <li>{{ rec }}</li>
           {% endfor %}
           {% if not report['recommendations'] %}
-            <li>Inga särskilda förbättringar identifierades.</li>
+            <li>No specific improvements identified.</li>
           {% endif %}
         </ul>
       </div>
     </section>
 
     <section class="card">
-      <h2>Topp 10 entitetstyper</h2>
+      <h2>Top 10 Entity Types</h2>
       <table class="table">
-        <thead><tr><th>Typ</th><th>Antal</th></tr></thead>
+        <thead><tr><th>Type</th><th>Count</th></tr></thead>
         <tbody>
           {% for row in report['counts']['by_type_top10'] %}
             <tr><td>{{ row['type'] }}</td><td>{{ row['count'] }}</td></tr>
@@ -201,15 +201,15 @@ REPORT_TEMPLATE = """
     </section>
 
     <section class="card">
-      <h2>Tung geometri (topp {{ report['geometry']['heavy_geometry_topN']|length }})</h2>
+      <h2>Heavy Geometry (Top {{ report['geometry']['heavy_geometry_topN']|length }})</h2>
       <table class="table">
-        <thead><tr><th>Score</th><th>Typ</th><th>Owner</th><th>GlobalId / Id</th></tr></thead>
+        <thead><tr><th>Score</th><th>Type</th><th>Owner</th><th>GlobalId / Id</th></tr></thead>
         <tbody>
           {% for g in report['geometry']['heavy_geometry_topN'] %}
             <tr>
               <td>{{ g['score'] }}</td>
               <td>{{ g['geometry_type'] }}</td>
-              <td>{{ g['owner_name'] or g['owner_type'] or 'okänd' }}</td>
+              <td>{{ g['owner_name'] or g['owner_type'] or 'unknown' }}</td>
               <td>{{ g['owner_globalid'] or g['geometry_id'] }}</td>
             </tr>
           {% endfor %}
@@ -218,7 +218,7 @@ REPORT_TEMPLATE = """
     </section>
 
     <section class="card">
-      <h2>AI-baserade rekommendationer</h2>
+      <h2>AI-Based Recommendations</h2>
       <ul>
         {% for rec in report['ai_recommendations'] %}
           <li>{{ rec }}</li>
@@ -227,7 +227,7 @@ REPORT_TEMPLATE = """
     </section>
 
     <section class="card">
-      <h2>Header metadata</h2>
+      <h2>Header Metadata</h2>
       <table class="table">
         <tbody>
           {% for key, val in report['header'].items() %}
@@ -251,15 +251,15 @@ def index():
 @app.route("/upload", methods=["POST"])
 def upload():
     if "ifc_file" not in request.files:
-        return jsonify({"error": "Ingen fil skickades."}), 400
+        return jsonify({"error": "No file was uploaded."}), 400
 
     file = request.files["ifc_file"]
     if file.filename == "":
-        return jsonify({"error": "Tom filnamn."}), 400
+        return jsonify({"error": "Empty filename."}), 400
 
     suffix = Path(file.filename).suffix.lower()
     if suffix not in [".ifc", ".ifczip", ".ifcz"]:
-        return jsonify({"error": "Fel filtyp. Använd .ifc eller .ifczip."}), 400
+        return jsonify({"error": "Invalid file type. Use .ifc or .ifczip."}), 400
 
     deep_orphan = request.form.get("deep_orphan_check") in ["1", "on", "true", "True"]
 
@@ -283,7 +283,7 @@ def upload():
         traceback.print_exc()
         return render_template_string(
             """
-            <html><body><h1>Analysfel</h1><pre>{{ error }}</pre><a href='/'>Tillbaka</a></body></html>
+            <html><body><h1>Analysis Error</h1><pre>{{ error }}</pre><a href='/'>Back</a></body></html>
             """,
             error=str(e)
         ), 500
