@@ -1,6 +1,16 @@
 
-import tkinter as tk
-from tkinter import filedialog, ttk, scrolledtext, messagebox
+try:
+    import tkinter as tk
+    from tkinter import filedialog, ttk, scrolledtext, messagebox
+    GUI_AVAILABLE = True
+except ImportError:
+    tk = None
+    filedialog = None
+    ttk = None
+    scrolledtext = None
+    messagebox = None
+    GUI_AVAILABLE = False
+
 import os
 import threading
 import collections
