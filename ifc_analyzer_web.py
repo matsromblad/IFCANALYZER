@@ -241,6 +241,81 @@ header h1 {
 .theme-toggle:hover {
     transform: scale(1.1);
 }
+
+/* Mobile responsiveness */
+@media (max-width: 768px) {
+    .container {
+        margin: 10px;
+        padding: 15px;
+    }
+    
+    .theme-toggle {
+        top: 10px;
+        right: 10px;
+        width: 45px;
+        height: 45px;
+        font-size: 18px;
+    }
+    
+    .drop-zone {
+        padding: 30px 15px;
+    }
+    
+    .table {
+        font-size: 14px;
+    }
+    
+    .table th,
+    .table td {
+        padding: 6px 4px;
+    }
+    
+    .btn-primary,
+    .btn-success {
+        width: 100%;
+        margin-bottom: 10px;
+    }
+    
+    .file-info {
+        font-size: 14px;
+    }
+    
+    header h1 {
+        font-size: 24px;
+    }
+    
+    .progress-container {
+        margin: 15px 0;
+    }
+}
+
+@media (max-width: 480px) {
+    .container {
+        margin: 5px;
+        padding: 10px;
+    }
+    
+    .drop-zone {
+        padding: 20px 10px;
+    }
+    
+    .card {
+        padding: 10px;
+    }
+    
+    header h1 {
+        font-size: 20px;
+    }
+    
+    .table {
+        font-size: 12px;
+    }
+    
+    .table th,
+    .table td {
+        padding: 4px 2px;
+    }
+}
 """
 
 UPLOAD_FORM = """
@@ -248,6 +323,7 @@ UPLOAD_FORM = """
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>IFC Analyzer Web</title>
   <style>""" + BASE_CSS + """</style>
 </head>
@@ -495,6 +571,7 @@ REPORT_TEMPLATE = """
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>IFC Analyzer Report</title>
   <style>""" + BASE_CSS + """</style>
 </head>
