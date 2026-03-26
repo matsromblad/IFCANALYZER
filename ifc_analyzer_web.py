@@ -61,45 +61,100 @@ def ai_recommendations(report):
     return result
 
 BASE_CSS = """
+:root {
+    --bg-color: #f2f4f7;
+    --text-color: #1c1f23;
+    --card-bg: #ffffff;
+    --card-border: #dedeef;
+    --table-border: #e6e9ef;
+    --table-header-bg: #f4f6fc;
+    --btn-primary: #2f80ed;
+    --btn-primary-hover: #1f6ad0;
+    --btn-success: #28a745;
+    --btn-success-hover: #218838;
+    --drop-zone-bg: #fafafa;
+    --drop-zone-border: #d0d0d0;
+    --drop-zone-hover: #f0f8ff;
+    --drop-zone-active: #f8fff8;
+    --file-info-bg: #e8f4fd;
+    --progress-bg: #f0f0f0;
+    --muted-text: #666;
+}
+
+[data-theme="dark"] {
+    --bg-color: #1a1a1a;
+    --text-color: #e0e0e0;
+    --card-bg: #2d2d2d;
+    --card-border: #404040;
+    --table-border: #404040;
+    --table-header-bg: #333333;
+    --btn-primary: #4a90e2;
+    --btn-primary-hover: #357abd;
+    --btn-success: #4caf50;
+    --btn-success-hover: #45a049;
+    --drop-zone-bg: #333333;
+    --drop-zone-border: #555555;
+    --drop-zone-hover: #2a4a6b;
+    --drop-zone-active: #2a4a2a;
+    --file-info-bg: #2a4a6b;
+    --progress-bg: #404040;
+    --muted-text: #999;
+}
+
 body {
     margin: 0;
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background: #f2f4f7;
-    color: #1c1f23;
+    background: var(--bg-color);
+    color: var(--text-color);
+    transition: background-color 0.3s ease, color 0.3s ease;
 }
 .container {
     max-width: 960px;
     margin: 30px auto;
     padding: 20px;
-    background: #ffffff;
+    background: var(--card-bg);
     border-radius: 12px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    transition: background-color 0.3s ease;
 }
 header h1 {
     margin-bottom: 8px;
 }
 .card {
-    border: 1px solid #dedeef;
+    border: 1px solid var(--card-border);
     border-radius: 8px;
     padding: 14px;
     margin-bottom: 20px;
-    background: #fff;
+    background: var(--card-bg);
+    transition: background-color 0.3s ease, border-color 0.3s ease;
 }
 .btn-primary {
-    background: #2f80ed;
+    background: var(--btn-primary);
     color: white;
     border: 0;
     border-radius: 6px;
     padding: 10px 16px;
     font-size: 16px;
     cursor: pointer;
+    transition: background-color 0.3s ease;
 }
-.btn-primary:hover { background: #1f6ad0; }
+.btn-primary:hover { background: var(--btn-primary-hover); }
+.btn-success {
+    background: var(--btn-success);
+    color: white;
+    border: 0;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+}
+.btn-success:hover { background: var(--btn-success-hover); }
 .report-key {
     font-weight: 700;
 }
 .report-value {
-    color: #333;
+    color: var(--text-color);
 }
 .table {
     width: 100%;
@@ -107,11 +162,12 @@ header h1 {
 }
 .table th,
 .table td {
-    border: 1px solid #e6e9ef;
+    border: 1px solid var(--table-border);
     padding: 8px;
     text-align: left;
+    transition: border-color 0.3s ease;
 }
-.table th { background: #f4f6fc; }
+.table th { background: var(--table-header-bg); transition: background-color 0.3s ease; }
 .progress-container {
     margin: 10px 0;
     display: none;
@@ -119,60 +175,72 @@ header h1 {
 .progress-bar {
     width: 100%;
     height: 20px;
-    background-color: #f0f0f0;
+    background-color: var(--progress-bg);
     border-radius: 10px;
     overflow: hidden;
+    transition: background-color 0.3s ease;
 }
 .progress-fill {
     height: 100%;
-    background-color: #2f80ed;
+    background-color: var(--btn-primary);
     width: 0%;
-    transition: width 0.3s ease;
+    transition: width 0.3s ease, background-color 0.3s ease;
 }
 .status-text {
     margin-top: 5px;
     font-size: 14px;
-    color: #666;
+    color: var(--muted-text);
+    transition: color 0.3s ease;
 }
 .drop-zone {
-    border: 2px dashed #d0d0d0;
+    border: 2px dashed var(--drop-zone-border);
     border-radius: 8px;
     padding: 40px 20px;
     text-align: center;
-    background: #fafafa;
+    background: var(--drop-zone-bg);
     transition: all 0.3s ease;
     cursor: pointer;
     margin-bottom: 20px;
 }
 .drop-zone.dragover {
-    border-color: #2f80ed;
-    background: #f0f8ff;
+    border-color: var(--btn-primary);
+    background: var(--drop-zone-hover);
 }
 .drop-zone.has-file {
-    border-color: #28a745;
-    background: #f8fff8;
+    border-color: var(--btn-success);
+    background: var(--drop-zone-active);
 }
 .file-info {
     margin-top: 15px;
     padding: 10px;
-    background: #e8f4fd;
+    background: var(--file-info-bg);
     border-radius: 6px;
     display: none;
+    transition: background-color 0.3s ease;
 }
 .file-info.show {
     display: block;
 }
-.download-btn {
-    background: #28a745;
-    color: white;
-    border: 0;
-    border-radius: 6px;
-    padding: 8px 16px;
-    font-size: 14px;
+.theme-toggle {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 50%;
+    width: 50px;
+    height: 50px;
     cursor: pointer;
-    margin-left: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    transition: all 0.3s ease;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
-.download-btn:hover { background: #218838; }
+.theme-toggle:hover {
+    transform: scale(1.1);
+}
 """
 
 UPLOAD_FORM = """
@@ -184,6 +252,8 @@ UPLOAD_FORM = """
   <style>""" + BASE_CSS + """</style>
 </head>
 <body>
+  <button id="themeToggle" class="theme-toggle" title="Toggle Dark Mode">🌙</button>
+  
   <div class="container">
     <header>
       <h1>IFC Analyzer Web</h1>
@@ -369,6 +439,28 @@ UPLOAD_FORM = """
         }
       });
     }
+
+    // Theme toggle functionality
+    const themeToggle = document.getElementById('themeToggle');
+    const currentTheme = localStorage.getItem('theme') || 'light';
+    
+    if (currentTheme === 'dark') {
+      document.documentElement.setAttribute('data-theme', 'dark');
+      themeToggle.textContent = '☀️';
+    }
+
+    themeToggle.addEventListener('click', function() {
+      const currentTheme = document.documentElement.getAttribute('data-theme');
+      if (currentTheme === 'dark') {
+        document.documentElement.removeAttribute('data-theme');
+        localStorage.setItem('theme', 'light');
+        themeToggle.textContent = '🌙';
+      } else {
+        document.documentElement.setAttribute('data-theme', 'dark');
+        localStorage.setItem('theme', 'dark');
+        themeToggle.textContent = '☀️';
+      }
+    });
   </script>
 </body>
 </html>
@@ -383,12 +475,14 @@ REPORT_TEMPLATE = """
   <style>""" + BASE_CSS + """</style>
 </head>
 <body>
+  <button id="themeToggle" class="theme-toggle" title="Toggle Dark Mode">🌙</button>
+  
   <div class="container">
     <header>
       <h1>IFC Analyzer Report</h1>
       <p>File: <strong>{{ report['meta']['filename'] }}</strong> ({{ report['meta']['filepath'] }})</p>
       <p>Schema: <strong>{{ report['meta']['schema'] or 'unknown' }}</strong> · Elapsed: <strong>{{ report['meta']['elapsed_seconds'] }} s</strong></p>
-      <p><a href="/">← New Analysis</a> <button id="downloadBtn" class="download-btn">Download JSON Report</button></p>
+      <p><a href="/">← New Analysis</a> <button id="downloadBtn" class="btn-success">Download JSON Report</button></p>
     </header>
 
     <section class="card">
@@ -461,6 +555,28 @@ REPORT_TEMPLATE = """
   <script>
     // Make report data available for download
     window.reportData = {{ report|tojson }};
+
+    // Theme toggle functionality
+    const themeToggle = document.getElementById('themeToggle');
+    const currentTheme = localStorage.getItem('theme') || 'light';
+    
+    if (currentTheme === 'dark') {
+      document.documentElement.setAttribute('data-theme', 'dark');
+      themeToggle.textContent = '☀️';
+    }
+
+    themeToggle.addEventListener('click', function() {
+      const currentTheme = document.documentElement.getAttribute('data-theme');
+      if (currentTheme === 'dark') {
+        document.documentElement.removeAttribute('data-theme');
+        localStorage.setItem('theme', 'light');
+        themeToggle.textContent = '🌙';
+      } else {
+        document.documentElement.setAttribute('data-theme', 'dark');
+        localStorage.setItem('theme', 'dark');
+        themeToggle.textContent = '☀️';
+      }
+    });
   </script>
 </body>
 </html>
