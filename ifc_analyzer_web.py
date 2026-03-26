@@ -242,6 +242,31 @@ header h1 {
     transform: scale(1.1);
 }
 
+/* Error handling */
+.error-container {
+    margin: 20px 0;
+}
+.error-message {
+    border: 1px solid #dc3545;
+    border-radius: 8px;
+    padding: 15px;
+    background: #f8d7da;
+    color: #721c24;
+}
+[data-theme="dark"] .error-message {
+    background: #2a1a1a;
+    border-color: #dc3545;
+    color: #ea868f;
+}
+.error-actions {
+    margin-top: 15px;
+    display: flex;
+    gap: 10px;
+}
+.error-actions button {
+    flex: 1;
+}
+
 /* Mobile responsiveness */
 @media (max-width: 768px) {
     .container {
@@ -360,11 +385,23 @@ UPLOAD_FORM = """
     <section class="card">
       <h2>Instructions</h2>
       <ul>
-        <li>Max file size: 1 GB.</li>
+        <li>Max file size: 1 GB per file.</li>
         <li>Results are displayed as HTML (JSON data is still available under the hood).</li>
         <li>For larger datasets: consider running locally with Python/Flask.</li>
+        <li>Batch upload: Select multiple IFC files for combined analysis.</li>
       </ul>
     </section>
+
+    <div id="errorContainer" class="error-container" style="display: none;">
+      <div class="error-message">
+        <h3>⚠️ Analysis Error</h3>
+        <p id="errorText"></p>
+        <div class="error-actions">
+          <button id="retryBtn" class="btn-primary">Retry Analysis</button>
+          <button id="dismissErrorBtn" class="btn-success">Dismiss</button>
+        </div>
+      </div>
+    </div>
 
     <div id="progressContainer" class="progress-container">
       <div class="progress-bar">
@@ -450,17 +487,34 @@ UPLOAD_FORM = """
       const progressContainer = document.getElementById('progressContainer');
       const progressFill = document.getElementById('progressFill');
       const statusText = document.getElementById('statusText');
+      const errorContainer = document.getElementById('errorContainer');
+      const errorText = document.getElementById('errorText');
 
       if (files.length === 0) {
-        alert('Please select at least one file.');
+        showError('Please select at least one file.');
         return;
       }
+
+      // Check file sizes
+      const maxSize = 1024 * 1024 * 1024; // 1GB
+      const oversizedFiles = files.filter(file => file.size > maxSize);
+      if (oversizedFiles.length > 0) {
+        showError(`File(s) too large: ${oversizedFiles.map(f => f.name).join(', ')}. Maximum size is 1GB per file.`);
+        return;
+      }
+
+      // Hide any previous errors
+      hideError();
 
       // Show progress bar
       progressContainer.style.display = 'block';
       analyzeBtn.disabled = true;
       analyzeBtn.textContent = 'Uploading...';
 
+      performAnalysis(files, deepCheck, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText);
+    });
+
+    function performAnalysis(files, deepCheck, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText) {
       const formData = new FormData();
       files.forEach(file => {
         formData.append('ifc_files', file);
@@ -470,6 +524,8 @@ UPLOAD_FORM = """
       }
 
       const xhr = new XMLHttpRequest();
+      let retryCount = 0;
+      const maxRetries = 2;
 
       // Upload progress
       xhr.upload.addEventListener('progress', function(e) {
@@ -490,36 +546,93 @@ UPLOAD_FORM = """
       // Response received
       xhr.addEventListener('load', function() {
         if (xhr.status === 200) {
-          // Replace page content with result
+          // Success - replace page content
           document.open();
           document.write(xhr.responseText);
           document.close();
         } else {
           // Error handling
-          progressContainer.style.display = 'none';
-          analyzeBtn.disabled = false;
-          analyzeBtn.textContent = 'Analyze';
-          try {
-            const error = JSON.parse(xhr.responseText);
-            alert('Error: ' + error.error);
-          } catch (e) {
-            alert('Upload failed. Please try again.');
-          }
+          handleError(xhr, retryCount, maxRetries, files, deepCheck, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText);
         }
       });
 
-      // Error handling
+      // Network error
       xhr.addEventListener('error', function() {
-        progressContainer.style.display = 'none';
-        analyzeBtn.disabled = false;
-        analyzeBtn.textContent = 'Analyze';
-        alert('Upload failed. Please check your connection and try again.');
+        handleError(xhr, retryCount, maxRetries, files, deepCheck, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText);
+      });
+
+      // Timeout
+      xhr.timeout = 300000; // 5 minutes
+      xhr.addEventListener('timeout', function() {
+        handleError(xhr, retryCount, maxRetries, files, deepCheck, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText, 'Request timed out. The analysis may be too large for the server.');
       });
 
       // Send request
       xhr.open('POST', '/upload');
       xhr.send(formData);
-    });
+    }
+
+    function handleError(xhr, retryCount, maxRetries, files, deepCheck, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText, customMessage = null) {
+      progressContainer.style.display = 'none';
+      analyzeBtn.disabled = false;
+      analyzeBtn.textContent = 'Analyze';
+
+      let errorMessage = customMessage;
+      if (!errorMessage) {
+        try {
+          const error = JSON.parse(xhr.responseText);
+          errorMessage = error.error || 'Unknown error occurred';
+        } catch (e) {
+          if (xhr.status === 413) {
+            errorMessage = 'Files are too large for the server. Try smaller files or fewer files.';
+          } else if (xhr.status === 500) {
+            errorMessage = 'Server error occurred. The IFC file may be corrupted or too complex.';
+          } else if (xhr.status === 0) {
+            errorMessage = 'Network error. Please check your connection and try again.';
+          } else {
+            errorMessage = `HTTP ${xhr.status}: ${xhr.statusText}`;
+          }
+        }
+      }
+
+      if (retryCount < maxRetries && (xhr.status >= 500 || xhr.status === 0)) {
+        // Auto-retry for server errors and network errors
+        retryCount++;
+        showError(`${errorMessage} Retrying... (${retryCount}/${maxRetries})`);
+        setTimeout(() => {
+          hideError();
+          performAnalysis(files, deepCheck, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText);
+        }, 2000 * retryCount); // Exponential backoff
+      } else {
+        showError(errorMessage, retryCount < maxRetries);
+      }
+    }
+
+    function showError(message, showRetry = true) {
+      const errorContainer = document.getElementById('errorContainer');
+      const errorText = document.getElementById('errorText');
+      const retryBtn = document.getElementById('retryBtn');
+      
+      errorText.textContent = message;
+      errorContainer.style.display = 'block';
+      
+      if (showRetry) {
+        retryBtn.style.display = 'inline-block';
+        retryBtn.onclick = function() {
+          hideError();
+          analyzeBtn.click();
+        };
+      } else {
+        retryBtn.style.display = 'none';
+      }
+    }
+
+    function hideError() {
+      document.getElementById('errorContainer').style.display = 'none';
+    }
+
+    // Dismiss error button
+    document.getElementById('dismissErrorBtn').addEventListener('click', hideError);
 
     // Download functionality (only on results page)
     if (document.getElementById('downloadBtn')) {
