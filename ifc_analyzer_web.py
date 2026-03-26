@@ -380,13 +380,6 @@ UPLOAD_FORM = """
         <div id="totalSize" style="margin-top: 8px; font-weight: bold;"></div>
       </div>
 
-      <div style="margin: 12px 0;">
-        <label><input type="checkbox" id="deep_orphan_check" name="deep_orphan_check" value="1"> Perform deep orphan check</label>
-        <div style="margin-top: 8px; font-size: 14px; color: var(--muted-text);">
-          <strong>What it does:</strong> Performs a thorough check for orphaned objects by analyzing all relationships in the IFC model.<br>
-          <strong>When to use:</strong> Enable for detailed analysis of complex models. Increases processing time but finds more potential issues.
-        </div>
-      </div>
       <button id="analyzeBtn" class="btn-primary" type="button">Analyze</button>
     </section>
 
@@ -397,7 +390,6 @@ UPLOAD_FORM = """
         <li>Results are displayed as HTML (JSON data is still available under the hood).</li>
         <li>For larger datasets: consider running locally with Python/Flask.</li>
         <li>Batch upload: Select multiple IFC files for combined analysis.</li>
-        <li><strong>Deep orphan check:</strong> Enable for thorough analysis of orphaned objects (slower but more comprehensive).</li>
       </ul>
     </section>
 
@@ -492,7 +484,6 @@ UPLOAD_FORM = """
 
     analyzeBtn.addEventListener('click', function() {
       const files = Array.from(fileInput.files);
-      const deepCheck = document.getElementById('deep_orphan_check').checked;
       const progressContainer = document.getElementById('progressContainer');
       const progressFill = document.getElementById('progressFill');
       const statusText = document.getElementById('statusText');
@@ -520,17 +511,14 @@ UPLOAD_FORM = """
       analyzeBtn.disabled = true;
       analyzeBtn.textContent = 'Uploading...';
 
-      performAnalysis(files, deepCheck, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText);
+      performAnalysis(files, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText);
     });
 
-    function performAnalysis(files, deepCheck, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText) {
+    function performAnalysis(files, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText) {
       const formData = new FormData();
       files.forEach(file => {
         formData.append('ifc_files', file);
       });
-      if (deepCheck) {
-        formData.append('deep_orphan_check', '1');
-      }
 
       const xhr = new XMLHttpRequest();
       
@@ -814,7 +802,8 @@ REPORT_TEMPLATE = """
 """
 
 
-def _run_analysis_job(job_id, filepaths, deep_orphan):
+def _run_analysis_job(job_id, filepaths):
+    deep_orphan = False
     try:
         combined_report = {
             "meta": {
@@ -843,7 +832,7 @@ def _run_analysis_job(job_id, filepaths, deep_orphan):
         for filepath in filepaths:
             ifc_report = analyze_ifc(
                 filepath,
-                AnalyzeOptions(deep_orphan_check=deep_orphan),
+                AnalyzeOptions(deep_orphan_check=False),
                 cancel_event=__import__('threading').Event(),
                 progress_cb=None,
             )
@@ -923,8 +912,7 @@ def upload():
     if not valid_files:
         return jsonify({"error": "No valid files selected."}), 400
 
-    deep_orphan = request.form.get("deep_orphan_check") in ["1", "on", "true", "True"]
-
+    # deep orphan check removed; always use standard orphan sampling mode
     tmpdir = tempfile.mkdtemp(prefix="ifc_analyzer_batch_")
     filepaths = []
 
@@ -944,7 +932,7 @@ def upload():
             "filepaths": filepaths,
         }
 
-        worker = Thread(target=_run_analysis_job, args=(job_id, filepaths, deep_orphan), daemon=True)
+        worker = Thread(target=_run_analysis_job, args=(job_id, filepaths), daemon=True)
         worker.start()
 
         return jsonify({

@@ -378,42 +378,26 @@ def analyze_ifc(
 
         heavy_geom_owners.append(info_dict)
 
-    # --- Orphans
+    # --- Orphans (fast, sample mode only)
     orphan_total = 0
     orphan_by_type = collections.Counter()
 
-    if options.deep_orphan_check:
-        if progress_cb:
-            progress_cb(0.92, "Orphan check (deep)…")
+    limit = min(options.orphan_sample_limit, len(all_all))
+    if progress_cb:
+        progress_cb(0.92, f"Orphan check (sample {limit:,})…")
 
-        referenced_ids = build_referenced_id_set(all_all, cancel_event, progress_cb)
+    sample = all_all[:limit]
+    referenced_ids = build_referenced_id_set(
+        sample, cancel_event, progress_cb, tick=1000
+    )
 
-        for ent in all_all:
-            if cancel_event.is_set():
-                break
+    for ent in sample:
+        if cancel_event.is_set():
+            break
 
-            if ent.id() not in referenced_ids:
-                orphan_by_type[ent.is_a()] += 1
-                orphan_total += 1
-
-    else:
-        limit = min(options.orphan_sample_limit, len(all_all))
-
-        if progress_cb:
-            progress_cb(0.92, f"Orphan check (sample {limit:,})…")
-
-        sample = all_all[:limit]
-        referenced_ids = build_referenced_id_set(
-            sample, cancel_event, progress_cb, tick=1000
-        )
-
-        for ent in sample:
-            if cancel_event.is_set():
-                break
-
-            if ent.id() not in referenced_ids:
-                orphan_by_type[ent.is_a()] += 1
-                orphan_total += 1
+        if ent.id() not in referenced_ids:
+            orphan_by_type[ent.is_a()] += 1
+            orphan_total += 1
 
     # --- Recommendations
     recommendations = []
