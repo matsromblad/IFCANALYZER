@@ -1,6 +1,81 @@
 IFC Analyzer
 ===============
 
+# IFC Analyzer Web
+
+A comprehensive web-based IFC (Industry Foundation Classes) model analyzer with advanced features for BIM professionals and developers.
+
+## Features
+
+### 🔍 **Core Analysis Capabilities**
+- **Entity Analysis**: Count and categorize all IFC entities in your model
+- **Geometry Analysis**: Identify heavy geometry objects that may impact performance
+- **Orphan Detection**: Find orphaned objects with optional deep checking
+- **Header Metadata**: Extract and display IFC file header information
+- **Schema Detection**: Automatic IFC schema version detection
+
+### 🌐 **Web Interface Features**
+- **Drag & Drop Upload**: Intuitive file upload with visual feedback
+- **Batch Processing**: Upload and analyze multiple IFC files simultaneously
+- **Real-time Progress**: Live upload and analysis progress tracking
+- **Dark Mode**: Toggle between light and dark themes
+- **Mobile Responsive**: Optimized for tablets and smartphones
+- **Error Handling**: Comprehensive error messages with retry mechanisms
+
+### 🤖 **AI-Powered Insights**
+- **Smart Recommendations**: AI-generated suggestions for IFC export optimization
+- **Exporter Detection**: Automatic detection of IFC export software
+- **Performance Tips**: Recommendations for file cleanup and optimization
+
+### 📊 **Results & Export**
+- **Comprehensive Reports**: Detailed HTML reports with tables and summaries
+- **JSON Export**: Download complete analysis data as JSON
+- **Visual Summaries**: Easy-to-read entity type breakdowns and statistics
+
+## Quick Start
+
+### Local Development
+```bash
+# Install dependencies
+pip install flask ifcopenshell ifctester
+
+# Set API key (optional, for AI recommendations)
+export GEMINI_API_KEY="your_api_key_here"
+
+# Run the web app
+python ifc_analyzer_web.py
+
+# Open in browser
+# http://localhost:5000
+```
+
+### Online Deployment
+The app is ready for deployment on platforms like Render.com, Heroku, or any Python hosting service.
+
+## Usage
+
+1. **Upload Files**: Drag & drop IFC files or click to browse
+2. **Configure Options**: Enable deep orphan checking if needed
+3. **Analyze**: Click "Analyze" to process your files
+4. **Review Results**: View comprehensive analysis in the web interface
+5. **Download**: Export JSON reports for further processing
+
+## Technical Details
+
+- **Backend**: Python Flask web framework
+- **IFC Processing**: ifcopenshell and ifctester libraries
+- **AI Integration**: Google Gemini API for intelligent recommendations
+- **Frontend**: Vanilla HTML/CSS/JavaScript with responsive design
+- **File Support**: .ifc, .ifczip, .ifcz files up to 1GB each
+- **Batch Support**: Multiple file analysis with combined results
+
+## API Environment Variables
+
+- `GEMINI_API_KEY`: Google Gemini API key for AI recommendations (optional)
+- `PORT`: Server port (defaults to 5000)
+
+---
+
 Ny branch: `web-upload`
 
 ## Web-upload funktionalitet
