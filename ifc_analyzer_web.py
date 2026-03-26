@@ -263,17 +263,16 @@ UPLOAD_FORM = """
     <section class="card">
       <div id="dropZone" class="drop-zone">
         <div>
-          <strong>Drag & Drop IFC File Here</strong><br>
-          <span style="color: #666; font-size: 14px;">or click to browse</span>
+          <strong>Drag & Drop IFC Files Here</strong><br>
+          <span style="color: var(--muted-text); font-size: 14px;">or click to browse (multiple files supported)</span>
         </div>
-        <input type="file" id="ifc_file" name="ifc_file" accept=".ifc,.ifczip,.ifcz" style="display: none;" required>
+        <input type="file" id="ifc_file" name="ifc_file" accept=".ifc,.ifczip,.ifcz" multiple style="display: none;" required>
       </div>
 
       <div id="fileInfo" class="file-info">
-        <strong>Selected File:</strong><br>
-        <span id="fileName">No file selected</span><br>
-        <span id="fileSize">Size: -</span><br>
-        <span id="fileType">Type: -</span>
+        <strong>Selected Files:</strong><br>
+        <div id="fileList"></div>
+        <div id="totalSize" style="margin-top: 8px; font-weight: bold;"></div>
       </div>
 
       <div style="margin: 12px 0;">
@@ -303,9 +302,8 @@ UPLOAD_FORM = """
     const dropZone = document.getElementById('dropZone');
     const fileInput = document.getElementById('ifc_file');
     const fileInfo = document.getElementById('fileInfo');
-    const fileName = document.getElementById('fileName');
-    const fileSize = document.getElementById('fileSize');
-    const fileType = document.getElementById('fileType');
+    const fileList = document.getElementById('fileList');
+    const totalSize = document.getElementById('totalSize');
     const analyzeBtn = document.getElementById('analyzeBtn');
 
     // Drag & Drop functionality
@@ -324,37 +322,61 @@ UPLOAD_FORM = """
       e.preventDefault();
       dropZone.classList.remove('dragover');
 
-      const files = e.dataTransfer.files;
+      const files = Array.from(e.dataTransfer.files).filter(file => {
+        const suffix = file.name.toLowerCase().split('.').pop();
+        return ['ifc', 'ifczip', 'ifcz'].includes(suffix);
+      });
+
       if (files.length > 0) {
-        fileInput.files = files;
-        updateFileInfo(files[0]);
+        // Create a new FileList-like object
+        const dt = new DataTransfer();
+        files.forEach(file => dt.items.add(file));
+        fileInput.files = dt.files;
+        updateFileInfo(files);
       }
     });
 
     fileInput.addEventListener('change', (e) => {
-      if (e.target.files.length > 0) {
-        updateFileInfo(e.target.files[0]);
+      const files = Array.from(e.target.files);
+      if (files.length > 0) {
+        updateFileInfo(files);
       }
     });
 
-    function updateFileInfo(file) {
-      fileName.textContent = file.name;
-      fileSize.textContent = `Size: ${(file.size / 1024 / 1024).toFixed(2)} MB`;
-      fileType.textContent = `Type: ${file.type || 'Unknown'}`;
+    function updateFileInfo(files) {
+      fileList.innerHTML = '';
+      let totalSizeBytes = 0;
+
+      files.forEach((file, index) => {
+        const fileItem = document.createElement('div');
+        fileItem.style.marginBottom = '4px';
+        fileItem.innerHTML = `
+          <span style="font-weight: bold;">${index + 1}.</span> ${file.name}
+          <span style="color: var(--muted-text); font-size: 12px;">
+            (${(file.size / 1024 / 1024).toFixed(2)} MB)
+          </span>
+        `;
+        fileList.appendChild(fileItem);
+        totalSizeBytes += file.size;
+      });
+
+      totalSize.textContent = `Total: ${files.length} file${files.length > 1 ? 's' : ''}, ${(totalSizeBytes / 1024 / 1024).toFixed(2)} MB`;
       fileInfo.classList.add('show');
       dropZone.classList.add('has-file');
-      dropZone.innerHTML = `<div><strong>${file.name}</strong><br><span style="color: #666;">Click to change file</span></div>`;
+      
+      const fileText = files.length === 1 ? '1 file selected' : `${files.length} files selected`;
+      dropZone.innerHTML = `<div><strong>${fileText}</strong><br><span style="color: var(--muted-text);">Click to change files</span></div>`;
     }
 
     analyzeBtn.addEventListener('click', function() {
-      const file = fileInput.files[0];
+      const files = Array.from(fileInput.files);
       const deepCheck = document.getElementById('deep_orphan_check').checked;
       const progressContainer = document.getElementById('progressContainer');
       const progressFill = document.getElementById('progressFill');
       const statusText = document.getElementById('statusText');
 
-      if (!file) {
-        alert('Please select a file first.');
+      if (files.length === 0) {
+        alert('Please select at least one file.');
         return;
       }
 
@@ -364,7 +386,9 @@ UPLOAD_FORM = """
       analyzeBtn.textContent = 'Uploading...';
 
       const formData = new FormData();
-      formData.append('ifc_file', file);
+      files.forEach(file => {
+        formData.append('ifc_files', file);
+      });
       if (deepCheck) {
         formData.append('deep_orphan_check', '1');
       }
@@ -480,7 +504,12 @@ REPORT_TEMPLATE = """
   <div class="container">
     <header>
       <h1>IFC Analyzer Report</h1>
-      <p>File: <strong>{{ report['meta']['filename'] }}</strong> ({{ report['meta']['filepath'] }})</p>
+      {% if report['meta']['files_analyzed'] %}
+        <p><strong>Batch Analysis:</strong> {{ report['meta']['files_analyzed']|length }} files analyzed</p>
+        <p><em>Files: {{ report['meta']['files_analyzed']|join(', ') }}</em></p>
+      {% else %}
+        <p>File: <strong>{{ report['meta']['filename'] }}</strong> ({{ report['meta']['filepath'] }})</p>
+      {% endif %}
       <p>Schema: <strong>{{ report['meta']['schema'] or 'unknown' }}</strong> · Elapsed: <strong>{{ report['meta']['elapsed_seconds'] }} s</strong></p>
       <p><a href="/">← New Analysis</a> <button id="downloadBtn" class="btn-success">Download JSON Report</button></p>
     </header>
@@ -590,35 +619,115 @@ def index():
 
 @app.route("/upload", methods=["POST"])
 def upload():
-    if "ifc_file" not in request.files:
-        return jsonify({"error": "No file was uploaded."}), 400
+    if "ifc_files" not in request.files and "ifc_file" not in request.files:
+        return jsonify({"error": "No files were uploaded."}), 400
 
-    file = request.files["ifc_file"]
-    if file.filename == "":
-        return jsonify({"error": "Empty filename."}), 400
+    # Handle both single file (legacy) and multiple files
+    files = []
+    if "ifc_files" in request.files:
+        files = request.files.getlist("ifc_files")
+    elif "ifc_file" in request.files:
+        files = [request.files["ifc_file"]]
 
-    suffix = Path(file.filename).suffix.lower()
-    if suffix not in [".ifc", ".ifczip", ".ifcz"]:
-        return jsonify({"error": "Invalid file type. Use .ifc or .ifczip."}), 400
+    if not files or all(file.filename == "" for file in files):
+        return jsonify({"error": "Empty filename(s)."}), 400
+
+    # Validate file types
+    valid_files = []
+    for file in files:
+        if file.filename == "":
+            continue
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in [".ifc", ".ifczip", ".ifcz"]:
+            return jsonify({"error": f"Invalid file type for {file.filename}. Use .ifc or .ifczip."}), 400
+        valid_files.append(file)
+
+    if not valid_files:
+        return jsonify({"error": "No valid files selected."}), 400
 
     deep_orphan = request.form.get("deep_orphan_check") in ["1", "on", "true", "True"]
 
-    tmpdir = tempfile.mkdtemp(prefix="ifc_analyzer_")
-    filepath = os.path.join(tmpdir, os.path.basename(file.filename))
-    file.save(filepath)
+    tmpdir = tempfile.mkdtemp(prefix="ifc_analyzer_batch_")
+    filepaths = []
 
     try:
-        report = analyze_ifc(
-            filepath,
-            AnalyzeOptions(deep_orphan_check=deep_orphan),
-            cancel_event=__import__('threading').Event(),
-            progress_cb=None,
-        )
+        # Save all files
+        for file in valid_files:
+            filepath = os.path.join(tmpdir, os.path.basename(file.filename))
+            file.save(filepath)
+            filepaths.append(filepath)
 
-        report['ai_recommendations'] = ai_recommendations(report)
+        # Analyze all files and combine results
+        combined_report = {
+            "meta": {
+                "filename": f"Batch of {len(filepaths)} files",
+                "filepath": tmpdir,
+                "entity_total": 0,
+                "elapsed_seconds": 0,
+                "files_analyzed": [os.path.basename(fp) for fp in filepaths]
+            },
+            "counts": {"by_type_top10": []},
+            "orphans": {"orphan_total": 0, "mode": "combined"},
+            "geometry": {"heavy_geometry_topN": []},
+            "recommendations": [],
+            "ai_recommendations": [],
+            "header": {}
+        }
 
-        presentation = render_template_string(REPORT_TEMPLATE, report=report)
+        type_counts = {}
+        all_orphans = []
+        all_heavy_geom = []
+        total_elapsed = 0
+
+        for filepath in filepaths:
+            report = analyze_ifc(
+                filepath,
+                AnalyzeOptions(deep_orphan_check=deep_orphan),
+                cancel_event=__import__('threading').Event(),
+                progress_cb=None,
+            )
+
+            # Aggregate metadata
+            combined_report["meta"]["entity_total"] += report.get("meta", {}).get("entity_total", 0)
+            total_elapsed += report.get("meta", {}).get("elapsed_seconds", 0)
+
+            # Aggregate type counts
+            for item in report.get("counts", {}).get("by_type_top10", []):
+                type_name = item["type"]
+                count = item["count"]
+                if type_name in type_counts:
+                    type_counts[type_name] += count
+                else:
+                    type_counts[type_name] = count
+
+            # Aggregate orphans
+            all_orphans.extend(report.get("orphans", {}).get("orphans", []))
+
+            # Aggregate heavy geometry
+            all_heavy_geom.extend(report.get("geometry", {}).get("heavy_geometry_topN", []))
+
+            # Collect recommendations
+            combined_report["recommendations"].extend(report.get("recommendations", []))
+
+            # Use header from first file
+            if not combined_report["header"]:
+                combined_report["header"] = report.get("header", {})
+
+        # Finalize combined data
+        combined_report["meta"]["elapsed_seconds"] = total_elapsed
+        combined_report["counts"]["by_type_top10"] = [
+            {"type": t, "count": c} for t, c in sorted(type_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+        ]
+        combined_report["orphans"]["orphan_total"] = len(all_orphans)
+        combined_report["orphans"]["orphans"] = all_orphans[:50]  # Limit for display
+        combined_report["geometry"]["heavy_geometry_topN"] = sorted(all_heavy_geom, key=lambda x: x.get("score", 0), reverse=True)[:20]
+
+        # Generate AI recommendations for combined data
+        combined_report['ai_recommendations'] = ai_recommendations(combined_report)
+
+        presentation = render_template_string(REPORT_TEMPLATE, report=combined_report)
         return presentation
+
     except Exception as e:
         traceback.print_exc()
         return render_template_string(
@@ -628,10 +737,12 @@ def upload():
             error=str(e)
         ), 500
     finally:
-        try:
-            os.remove(filepath)
-        except Exception:
-            pass
+        # Clean up files
+        for filepath in filepaths:
+            try:
+                os.remove(filepath)
+            except Exception:
+                pass
         try:
             os.rmdir(tmpdir)
         except Exception:
