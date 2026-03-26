@@ -112,6 +112,28 @@ header h1 {
     text-align: left;
 }
 .table th { background: #f4f6fc; }
+.progress-container {
+    margin: 10px 0;
+    display: none;
+}
+.progress-bar {
+    width: 100%;
+    height: 20px;
+    background-color: #f0f0f0;
+    border-radius: 10px;
+    overflow: hidden;
+}
+.progress-fill {
+    height: 100%;
+    background-color: #2f80ed;
+    width: 0%;
+    transition: width 0.3s ease;
+}
+.status-text {
+    margin-top: 5px;
+    font-size: 14px;
+    color: #666;
+}
 """
 
 UPLOAD_FORM = """
@@ -130,16 +152,14 @@ UPLOAD_FORM = """
     </header>
 
     <section class="card">
-      <form method="post" action="/upload" enctype="multipart/form-data">
-        <div>
-          <label for="ifc_file"><strong>Select IFC File</strong></label><br>
-          <input type="file" id="ifc_file" name="ifc_file" accept=".ifc,.ifczip,.ifcz" required>
-        </div>
-        <div style="margin: 12px 0;">
-          <label><input type="checkbox" name="deep_orphan_check" value="1"> Perform deep orphan check</label>
-        </div>
-        <button class="btn-primary" type="submit">Analyze</button>
-      </form>
+      <div>
+        <label for="ifc_file"><strong>Select IFC File</strong></label><br>
+        <input type="file" id="ifc_file" name="ifc_file" accept=".ifc,.ifczip,.ifcz" required>
+      </div>
+      <div style="margin: 12px 0;">
+        <label><input type="checkbox" id="deep_orphan_check" name="deep_orphan_check" value="1"> Perform deep orphan check</label>
+      </div>
+      <button id="analyzeBtn" class="btn-primary" type="button">Analyze</button>
     </section>
 
     <section class="card">
@@ -150,7 +170,92 @@ UPLOAD_FORM = """
         <li>For larger datasets: consider running locally with Python/Flask.</li>
       </ul>
     </section>
+
+    <div id="progressContainer" class="progress-container">
+      <div class="progress-bar">
+        <div id="progressFill" class="progress-fill"></div>
+      </div>
+      <div id="statusText" class="status-text">Preparing upload...</div>
+    </div>
   </div>
+
+  <script>
+    document.getElementById('analyzeBtn').addEventListener('click', function() {
+      const fileInput = document.getElementById('ifc_file');
+      const deepCheck = document.getElementById('deep_orphan_check').checked;
+      const progressContainer = document.getElementById('progressContainer');
+      const progressFill = document.getElementById('progressFill');
+      const statusText = document.getElementById('statusText');
+      const analyzeBtn = document.getElementById('analyzeBtn');
+
+      if (!fileInput.files[0]) {
+        alert('Please select a file first.');
+        return;
+      }
+
+      // Show progress bar
+      progressContainer.style.display = 'block';
+      analyzeBtn.disabled = true;
+      analyzeBtn.textContent = 'Uploading...';
+
+      const formData = new FormData();
+      formData.append('ifc_file', fileInput.files[0]);
+      if (deepCheck) {
+        formData.append('deep_orphan_check', '1');
+      }
+
+      const xhr = new XMLHttpRequest();
+
+      // Upload progress
+      xhr.upload.addEventListener('progress', function(e) {
+        if (e.lengthComputable) {
+          const percentComplete = (e.loaded / e.total) * 100;
+          progressFill.style.width = percentComplete + '%';
+          statusText.textContent = `Uploading... ${Math.round(percentComplete)}% (${(e.loaded / 1024 / 1024).toFixed(1)} MB / ${(e.total / 1024 / 1024).toFixed(1)} MB)`;
+        }
+      });
+
+      // Upload complete
+      xhr.upload.addEventListener('load', function() {
+        progressFill.style.width = '100%';
+        statusText.textContent = 'Upload complete. Analyzing...';
+        analyzeBtn.textContent = 'Analyzing...';
+      });
+
+      // Response received
+      xhr.addEventListener('load', function() {
+        if (xhr.status === 200) {
+          // Replace page content with result
+          document.open();
+          document.write(xhr.responseText);
+          document.close();
+        } else {
+          // Error handling
+          progressContainer.style.display = 'none';
+          analyzeBtn.disabled = false;
+          analyzeBtn.textContent = 'Analyze';
+          try {
+            const error = JSON.parse(xhr.responseText);
+            alert('Error: ' + error.error);
+          } catch (e) {
+            alert('Upload failed. Please try again.');
+          }
+        }
+      });
+
+      // Error handling
+      xhr.addEventListener('error', function() {
+        progressContainer.style.display = 'none';
+        analyzeBtn.disabled = false;
+        analyzeBtn.textContent = 'Analyze';
+        alert('Upload failed. Please check your connection and try again.');
+      });
+
+      // Send request
+      xhr.open('POST', '/upload');
+      xhr.send(formData);
+    });
+  </script>
 </body>
 </html>
 """
