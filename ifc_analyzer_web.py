@@ -378,6 +378,10 @@ UPLOAD_FORM = """
 
       <div style="margin: 12px 0;">
         <label><input type="checkbox" id="deep_orphan_check" name="deep_orphan_check" value="1"> Perform deep orphan check</label>
+        <div style="margin-top: 8px; font-size: 14px; color: var(--muted-text);">
+          <strong>What it does:</strong> Performs a thorough check for orphaned objects by analyzing all relationships in the IFC model.<br>
+          <strong>When to use:</strong> Enable for detailed analysis of complex models. Increases processing time but finds more potential issues.
+        </div>
       </div>
       <button id="analyzeBtn" class="btn-primary" type="button">Analyze</button>
     </section>
@@ -389,6 +393,7 @@ UPLOAD_FORM = """
         <li>Results are displayed as HTML (JSON data is still available under the hood).</li>
         <li>For larger datasets: consider running locally with Python/Flask.</li>
         <li>Batch upload: Select multiple IFC files for combined analysis.</li>
+        <li><strong>Deep orphan check:</strong> Enable for thorough analysis of orphaned objects (slower but more comprehensive).</li>
       </ul>
     </section>
 

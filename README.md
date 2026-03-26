@@ -32,6 +32,16 @@ A comprehensive web-based IFC (Industry Foundation Classes) model analyzer with 
 - **JSON Export**: Download complete analysis data as JSON
 - **Visual Summaries**: Easy-to-read entity type breakdowns and statistics
 
+## Analysis Options
+
+### Deep Orphan Check
+The deep orphan check performs a thorough analysis of orphaned objects in IFC models:
+
+- **What it does**: Analyzes all relationships and references in the IFC file to identify truly orphaned objects
+- **When to use**: Enable for complex models or when standard orphan detection misses issues
+- **Performance impact**: Increases analysis time but provides more comprehensive results
+- **Use case**: Quality assurance, model cleanup, identifying potential data integrity issues
+
 ## Quick Start
 
 ### Local Development
@@ -55,7 +65,7 @@ The app is ready for deployment on platforms like Render.com, Heroku, or any Pyt
 ## Usage
 
 1. **Upload Files**: Drag & drop IFC files or click to browse
-2. **Configure Options**: Enable deep orphan checking if needed
+2. **Configure Options**: Enable deep orphan checking for thorough analysis (slower but more comprehensive)
 3. **Analyze**: Click "Analyze" to process your files
 4. **Review Results**: View comprehensive analysis in the web interface
 5. **Download**: Export JSON reports for further processing
