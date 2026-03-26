@@ -2,7 +2,9 @@ import os
 import tempfile
 import json
 import traceback
+import uuid
 from pathlib import Path
+from threading import Thread
 from flask import Flask, request, jsonify, render_template_string
 
 # Reuse core analysis from existing module
@@ -10,6 +12,8 @@ from ifc_analyzer import analyze_ifc, AnalyzeOptions
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024  # 1 GB upload limit
+
+JOB_STORE = {}  # job_id -> {status, message, report, error}
 
 
 def detect_exporter(report):
@@ -529,9 +533,7 @@ UPLOAD_FORM = """
       }
 
       const xhr = new XMLHttpRequest();
-      let retryCount = 0;
-      const maxRetries = 2;
-
+      
       // Upload progress
       xhr.upload.addEventListener('progress', function(e) {
         if (e.lengthComputable) {
@@ -541,76 +543,81 @@ UPLOAD_FORM = """
         }
       });
 
-      // Upload complete
       xhr.upload.addEventListener('load', function() {
         progressFill.style.width = '100%';
-        statusText.textContent = 'Upload complete. Analyzing...';
-        analyzeBtn.textContent = 'Analyzing...';
+        statusText.textContent = 'Upload complete. Analysis will continue in background.';
       });
 
-      // Response received
       xhr.addEventListener('load', function() {
         if (xhr.status === 200) {
-          // Success - replace page content
-          document.open();
-          document.write(xhr.responseText);
-          document.close();
+          const data = JSON.parse(xhr.responseText);
+          const jobId = data.job_id;
+          statusText.textContent = 'Job queued, polling status...';
+          pollJobStatus(jobId, statusText, analyzeBtn, errorContainer, errorText);
         } else {
-          // Error handling
-          handleError(xhr, retryCount, maxRetries, files, deepCheck, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText);
+          handleUploadError(xhr, analyzeBtn, errorContainer, errorText);
         }
       });
 
-      // Network error
       xhr.addEventListener('error', function() {
-        handleError(xhr, retryCount, maxRetries, files, deepCheck, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText);
+        handleUploadError(xhr, analyzeBtn, errorContainer, errorText);
       });
 
-      // Timeout
-      xhr.timeout = 300000; // 5 minutes
+      xhr.timeout = 120000; // 2 minutes
       xhr.addEventListener('timeout', function() {
-        handleError(xhr, retryCount, maxRetries, files, deepCheck, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText, 'Request timed out. The analysis may be too large for the server.');
+        handleUploadError(xhr, analyzeBtn, errorContainer, errorText, 'Upload timed out. Please try again.');
       });
 
-      // Send request
       xhr.open('POST', '/upload');
       xhr.send(formData);
     }
 
-    function handleError(xhr, retryCount, maxRetries, files, deepCheck, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText, customMessage = null) {
-      progressContainer.style.display = 'none';
+    function pollJobStatus(jobId, statusText, analyzeBtn, errorContainer, errorText) {
+      const intervalId = setInterval(() => {
+        fetch(`/status/${jobId}`)
+          .then(r => r.json())
+          .then(data => {
+            if (data.status === 'running') {
+              statusText.textContent = `Analysis running: ${data.message || ''}`;
+              return;
+            }
+            clearInterval(intervalId);
+            if (data.status === 'complete') {
+              window.location.href = `/report/${jobId}`;
+            } else if (data.status === 'error') {
+              showError(`Analysis failed: ${data.error || data.message || 'Unknown error'}`, false);
+              analyzeBtn.disabled = false;
+              analyzeBtn.textContent = 'Analyze';
+              progressFill.style.width = '0%';
+              statusText.textContent = 'Error occurred';
+            } else {
+              showError(`Job status: ${data.status}.`, false);
+              analyzeBtn.disabled = false;
+              analyzeBtn.textContent = 'Analyze';
+            }
+          })
+          .catch(err => {
+            clearInterval(intervalId);
+            showError(`Status poll failed: ${err.message}`, true);
+            analyzeBtn.disabled = false;
+            analyzeBtn.textContent = 'Analyze';
+          });
+      }, 3000);
+    }
+
+    function handleUploadError(xhr, analyzeBtn, errorContainer, errorText, customMessage = null) {
       analyzeBtn.disabled = false;
       analyzeBtn.textContent = 'Analyze';
-
-      let errorMessage = customMessage;
-      if (!errorMessage) {
+      let msg = customMessage;
+      if (!msg) {
         try {
           const error = JSON.parse(xhr.responseText);
-          errorMessage = error.error || 'Unknown error occurred';
+          msg = error.error || 'Unknown upload error';
         } catch (e) {
-          if (xhr.status === 413) {
-            errorMessage = 'Files are too large for the server. Try smaller files or fewer files.';
-          } else if (xhr.status === 500) {
-            errorMessage = 'Server error occurred. The IFC file may be corrupted or too complex.';
-          } else if (xhr.status === 0) {
-            errorMessage = 'Network error. Please check your connection and try again.';
-          } else {
-            errorMessage = `HTTP ${xhr.status}: ${xhr.statusText}`;
-          }
+          msg = xhr.status ? `HTTP ${xhr.status}: ${xhr.statusText}` : 'Network error';
         }
       }
-
-      if (retryCount < maxRetries && (xhr.status >= 500 || xhr.status === 0)) {
-        // Auto-retry for server errors and network errors
-        retryCount++;
-        showError(`${errorMessage} Retrying... (${retryCount}/${maxRetries})`);
-        setTimeout(() => {
-          hideError();
-          performAnalysis(files, deepCheck, progressContainer, progressFill, statusText, analyzeBtn, errorContainer, errorText);
-        }, 2000 * retryCount); // Exponential backoff
-      } else {
-        showError(errorMessage, retryCount < maxRetries);
-      }
+      showError(msg, true);
     }
 
     function showError(message, showRetry = true) {
@@ -807,6 +814,84 @@ REPORT_TEMPLATE = """
 """
 
 
+def _run_analysis_job(job_id, filepaths, deep_orphan):
+    try:
+        combined_report = {
+            "meta": {
+                "filename": f"Batch of {len(filepaths)} files",
+                "filepath": filepaths,
+                "entity_total": 0,
+                "elapsed_seconds": 0,
+                "files_analyzed": [os.path.basename(fp) for fp in filepaths]
+            },
+            "counts": {"by_type_top10": []},
+            "orphans": {"orphan_total": 0, "mode": "combined", "orphans": []},
+            "geometry": {"heavy_geometry_topN": []},
+            "recommendations": [],
+            "ai_recommendations": [],
+            "header": {}
+        }
+
+        type_counts = {}
+        all_orphans = []
+        all_heavy_geom = []
+        total_elapsed = 0
+
+        JOB_STORE[job_id]["status"] = "running"
+        JOB_STORE[job_id]["message"] = "Starting analysis..."
+
+        for filepath in filepaths:
+            ifc_report = analyze_ifc(
+                filepath,
+                AnalyzeOptions(deep_orphan_check=deep_orphan),
+                cancel_event=__import__('threading').Event(),
+                progress_cb=None,
+            )
+            combined_report["meta"]["entity_total"] += ifc_report.get("meta", {}).get("entity_total", 0)
+            total_elapsed += ifc_report.get("meta", {}).get("elapsed_seconds", 0)
+
+            for item in ifc_report.get("counts", {}).get("by_type_top10", []):
+                type_counts[item["type"]] = type_counts.get(item["type"], 0) + item["count"]
+
+            all_orphans.extend(ifc_report.get("orphans", {}).get("orphans", []))
+            all_heavy_geom.extend(ifc_report.get("geometry", {}).get("heavy_geometry_topN", []))
+            combined_report["recommendations"].extend(ifc_report.get("recommendations", []))
+
+            if not combined_report["header"]:
+                combined_report["header"] = ifc_report.get("header", {})
+
+        combined_report["meta"]["elapsed_seconds"] = total_elapsed
+        combined_report["counts"]["by_type_top10"] = [
+            {"type": k, "count": v} for k, v in sorted(type_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+        ]
+        combined_report["orphans"]["orphan_total"] = len(all_orphans)
+        combined_report["orphans"]["orphans"] = all_orphans[:50]
+        combined_report["geometry"]["heavy_geometry_topN"] = sorted(all_heavy_geom, key=lambda x: x.get("score", 0), reverse=True)[:20]
+        combined_report["ai_recommendations"] = ai_recommendations(combined_report)
+
+        JOB_STORE[job_id]["status"] = "complete"
+        JOB_STORE[job_id]["report"] = combined_report
+        JOB_STORE[job_id]["message"] = "Analysis complete"
+    except Exception as e:
+        traceback.print_exc()
+        JOB_STORE[job_id]["status"] = "error"
+        JOB_STORE[job_id]["error"] = str(e)
+        JOB_STORE[job_id]["message"] = "Analysis failed"
+    finally:
+        # Clean up files after analysis is done (or if error)
+        for fp in filepaths:
+            try:
+                os.remove(fp)
+            except Exception:
+                pass
+        tmpdir = JOB_STORE.get(job_id, {}).get("tmpdir")
+        if tmpdir:
+            try:
+                os.rmdir(tmpdir)
+            except Exception:
+                pass
+
+
 @app.route("/", methods=["GET"])
 def index():
     return render_template_string(UPLOAD_FORM)
@@ -817,7 +902,6 @@ def upload():
     if "ifc_files" not in request.files and "ifc_file" not in request.files:
         return jsonify({"error": "No files were uploaded."}), 400
 
-    # Handle both single file (legacy) and multiple files
     files = []
     if "ifc_files" in request.files:
         files = request.files.getlist("ifc_files")
@@ -827,7 +911,6 @@ def upload():
     if not files or all(file.filename == "" for file in files):
         return jsonify({"error": "Empty filename(s)."}), 400
 
-    # Validate file types
     valid_files = []
     for file in files:
         if file.filename == "":
@@ -846,102 +929,54 @@ def upload():
     filepaths = []
 
     try:
-        # Save all files
         for file in valid_files:
             filepath = os.path.join(tmpdir, os.path.basename(file.filename))
             file.save(filepath)
             filepaths.append(filepath)
 
-        # Analyze all files and combine results
-        combined_report = {
-            "meta": {
-                "filename": f"Batch of {len(filepaths)} files",
-                "filepath": tmpdir,
-                "entity_total": 0,
-                "elapsed_seconds": 0,
-                "files_analyzed": [os.path.basename(fp) for fp in filepaths]
-            },
-            "counts": {"by_type_top10": []},
-            "orphans": {"orphan_total": 0, "mode": "combined"},
-            "geometry": {"heavy_geometry_topN": []},
-            "recommendations": [],
-            "ai_recommendations": [],
-            "header": {}
+        job_id = str(uuid.uuid4())
+        JOB_STORE[job_id] = {
+            "status": "pending",
+            "message": "Waiting for analysis",
+            "report": None,
+            "error": None,
+            "tmpdir": tmpdir,
+            "filepaths": filepaths,
         }
 
-        type_counts = {}
-        all_orphans = []
-        all_heavy_geom = []
-        total_elapsed = 0
+        worker = Thread(target=_run_analysis_job, args=(job_id, filepaths, deep_orphan), daemon=True)
+        worker.start()
 
-        for filepath in filepaths:
-            report = analyze_ifc(
-                filepath,
-                AnalyzeOptions(deep_orphan_check=deep_orphan),
-                cancel_event=__import__('threading').Event(),
-                progress_cb=None,
-            )
-
-            # Aggregate metadata
-            combined_report["meta"]["entity_total"] += report.get("meta", {}).get("entity_total", 0)
-            total_elapsed += report.get("meta", {}).get("elapsed_seconds", 0)
-
-            # Aggregate type counts
-            for item in report.get("counts", {}).get("by_type_top10", []):
-                type_name = item["type"]
-                count = item["count"]
-                if type_name in type_counts:
-                    type_counts[type_name] += count
-                else:
-                    type_counts[type_name] = count
-
-            # Aggregate orphans
-            all_orphans.extend(report.get("orphans", {}).get("orphans", []))
-
-            # Aggregate heavy geometry
-            all_heavy_geom.extend(report.get("geometry", {}).get("heavy_geometry_topN", []))
-
-            # Collect recommendations
-            combined_report["recommendations"].extend(report.get("recommendations", []))
-
-            # Use header from first file
-            if not combined_report["header"]:
-                combined_report["header"] = report.get("header", {})
-
-        # Finalize combined data
-        combined_report["meta"]["elapsed_seconds"] = total_elapsed
-        combined_report["counts"]["by_type_top10"] = [
-            {"type": t, "count": c} for t, c in sorted(type_counts.items(), key=lambda x: x[1], reverse=True)[:10]
-        ]
-        combined_report["orphans"]["orphan_total"] = len(all_orphans)
-        combined_report["orphans"]["orphans"] = all_orphans[:50]  # Limit for display
-        combined_report["geometry"]["heavy_geometry_topN"] = sorted(all_heavy_geom, key=lambda x: x.get("score", 0), reverse=True)[:20]
-
-        # Generate AI recommendations for combined data
-        combined_report['ai_recommendations'] = ai_recommendations(combined_report)
-
-        presentation = render_template_string(REPORT_TEMPLATE, report=combined_report)
-        return presentation
-
+        return jsonify({
+            "job_id": job_id,
+            "status_url": f"/status/{job_id}",
+            "report_url": f"/report/{job_id}",
+            "message": "Analysis started; poll /status/{job_id}."
+        })
     except Exception as e:
         traceback.print_exc()
-        return render_template_string(
-            """
-            <html><body><h1>Analysis Error</h1><pre>{{ error }}</pre><a href='/'>Back</a></body></html>
-            """,
-            error=str(e)
-        ), 500
-    finally:
-        # Clean up files
-        for filepath in filepaths:
-            try:
-                os.remove(filepath)
-            except Exception:
-                pass
-        try:
-            os.rmdir(tmpdir)
-        except Exception:
-            pass
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/status/<job_id>", methods=["GET"])
+def status(job_id):
+    job = JOB_STORE.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found."}), 404
+    response = {k: job[k] for k in ["status", "message"] if k in job}
+    if job["status"] == "error":
+        response["error"] = job.get("error")
+    return jsonify(response)
+
+
+@app.route("/report/<job_id>", methods=["GET"])
+def report(job_id):
+    job = JOB_STORE.get(job_id)
+    if not job:
+        return "Job not found.", 404
+    if job["status"] != "complete":
+        return f"Job status: {job['status']}. Wait and retry.", 202
+    return render_template_string(REPORT_TEMPLATE, report=job["report"])
 
 
 if __name__ == "__main__":
