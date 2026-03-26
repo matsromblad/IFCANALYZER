@@ -134,6 +134,45 @@ header h1 {
     font-size: 14px;
     color: #666;
 }
+.drop-zone {
+    border: 2px dashed #d0d0d0;
+    border-radius: 8px;
+    padding: 40px 20px;
+    text-align: center;
+    background: #fafafa;
+    transition: all 0.3s ease;
+    cursor: pointer;
+    margin-bottom: 20px;
+}
+.drop-zone.dragover {
+    border-color: #2f80ed;
+    background: #f0f8ff;
+}
+.drop-zone.has-file {
+    border-color: #28a745;
+    background: #f8fff8;
+}
+.file-info {
+    margin-top: 15px;
+    padding: 10px;
+    background: #e8f4fd;
+    border-radius: 6px;
+    display: none;
+}
+.file-info.show {
+    display: block;
+}
+.download-btn {
+    background: #28a745;
+    color: white;
+    border: 0;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 14px;
+    cursor: pointer;
+    margin-left: 10px;
+}
+.download-btn:hover { background: #218838; }
 """
 
 UPLOAD_FORM = """
@@ -152,10 +191,21 @@ UPLOAD_FORM = """
     </header>
 
     <section class="card">
-      <div>
-        <label for="ifc_file"><strong>Select IFC File</strong></label><br>
-        <input type="file" id="ifc_file" name="ifc_file" accept=".ifc,.ifczip,.ifcz" required>
+      <div id="dropZone" class="drop-zone">
+        <div>
+          <strong>Drag & Drop IFC File Here</strong><br>
+          <span style="color: #666; font-size: 14px;">or click to browse</span>
+        </div>
+        <input type="file" id="ifc_file" name="ifc_file" accept=".ifc,.ifczip,.ifcz" style="display: none;" required>
       </div>
+
+      <div id="fileInfo" class="file-info">
+        <strong>Selected File:</strong><br>
+        <span id="fileName">No file selected</span><br>
+        <span id="fileSize">Size: -</span><br>
+        <span id="fileType">Type: -</span>
+      </div>
+
       <div style="margin: 12px 0;">
         <label><input type="checkbox" id="deep_orphan_check" name="deep_orphan_check" value="1"> Perform deep orphan check</label>
       </div>
@@ -180,15 +230,60 @@ UPLOAD_FORM = """
   </div>
 
   <script>
-    document.getElementById('analyzeBtn').addEventListener('click', function() {
-      const fileInput = document.getElementById('ifc_file');
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('ifc_file');
+    const fileInfo = document.getElementById('fileInfo');
+    const fileName = document.getElementById('fileName');
+    const fileSize = document.getElementById('fileSize');
+    const fileType = document.getElementById('fileType');
+    const analyzeBtn = document.getElementById('analyzeBtn');
+
+    // Drag & Drop functionality
+    dropZone.addEventListener('click', () => fileInput.click());
+
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    });
+
+    dropZone.addEventListener('dragleave', () => {
+      dropZone.classList.remove('dragover');
+    });
+
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+
+      const files = e.dataTransfer.files;
+      if (files.length > 0) {
+        fileInput.files = files;
+        updateFileInfo(files[0]);
+      }
+    });
+
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files.length > 0) {
+        updateFileInfo(e.target.files[0]);
+      }
+    });
+
+    function updateFileInfo(file) {
+      fileName.textContent = file.name;
+      fileSize.textContent = `Size: ${(file.size / 1024 / 1024).toFixed(2)} MB`;
+      fileType.textContent = `Type: ${file.type || 'Unknown'}`;
+      fileInfo.classList.add('show');
+      dropZone.classList.add('has-file');
+      dropZone.innerHTML = `<div><strong>${file.name}</strong><br><span style="color: #666;">Click to change file</span></div>`;
+    }
+
+    analyzeBtn.addEventListener('click', function() {
+      const file = fileInput.files[0];
       const deepCheck = document.getElementById('deep_orphan_check').checked;
       const progressContainer = document.getElementById('progressContainer');
       const progressFill = document.getElementById('progressFill');
       const statusText = document.getElementById('statusText');
-      const analyzeBtn = document.getElementById('analyzeBtn');
 
-      if (!fileInput.files[0]) {
+      if (!file) {
         alert('Please select a file first.');
         return;
       }
@@ -199,7 +294,7 @@ UPLOAD_FORM = """
       analyzeBtn.textContent = 'Uploading...';
 
       const formData = new FormData();
-      formData.append('ifc_file', fileInput.files[0]);
+      formData.append('ifc_file', file);
       if (deepCheck) {
         formData.append('deep_orphan_check', '1');
       }
@@ -255,6 +350,25 @@ UPLOAD_FORM = """
       xhr.open('POST', '/upload');
       xhr.send(formData);
     });
+
+    // Download functionality (only on results page)
+    if (document.getElementById('downloadBtn')) {
+      document.getElementById('downloadBtn').addEventListener('click', function() {
+        // Get the report data from the page (we'll need to store it)
+        const reportData = window.reportData; // We'll set this when rendering the template
+        if (reportData) {
+          const dataStr = JSON.stringify(reportData, null, 2);
+          const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+
+          const exportFileDefaultName = `${reportData.meta.filename.replace('.ifc', '')}_report.json`;
+
+          const linkElement = document.createElement('a');
+          linkElement.setAttribute('href', dataUri);
+          linkElement.setAttribute('download', exportFileDefaultName);
+          linkElement.click();
+        }
+      });
+    }
   </script>
 </body>
 </html>
@@ -274,7 +388,7 @@ REPORT_TEMPLATE = """
       <h1>IFC Analyzer Report</h1>
       <p>File: <strong>{{ report['meta']['filename'] }}</strong> ({{ report['meta']['filepath'] }})</p>
       <p>Schema: <strong>{{ report['meta']['schema'] or 'unknown' }}</strong> · Elapsed: <strong>{{ report['meta']['elapsed_seconds'] }} s</strong></p>
-      <p><a href="/">← New Analysis</a></p>
+      <p><a href="/">← New Analysis</a> <button id="downloadBtn" class="download-btn">Download JSON Report</button></p>
     </header>
 
     <section class="card">
@@ -343,6 +457,11 @@ REPORT_TEMPLATE = """
     </section>
 
   </div>
+
+  <script>
+    // Make report data available for download
+    window.reportData = {{ report|tojson }};
+  </script>
 </body>
 </html>
 """
